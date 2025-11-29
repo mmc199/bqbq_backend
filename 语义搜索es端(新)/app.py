@@ -7,10 +7,12 @@ import shutil
 import threading
 import traceback
 import concurrent.futures
+import random
 from typing import List, Dict, Any
 
 from flask import Flask, send_file, send_from_directory, request, jsonify, Response, stream_with_context, redirect
 from elasticsearch import Elasticsearch, helpers, exceptions as es_exceptions
+from PIL import Image
 
 # =========================
 # 1. 配置与常量
@@ -18,11 +20,14 @@ from elasticsearch import Elasticsearch, helpers, exceptions as es_exceptions
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 IMAGE_FOLDER = os.path.join(BASE_DIR, 'meme_images')
+THUMBNAIL_FOLDER = os.path.join(BASE_DIR, 'meme_images_thumbnail')
 TRASH_DIR = os.path.join(BASE_DIR, 'trash_bin')
 DB_DIR = os.path.join(BASE_DIR, 'db') 
+THUMBNAIL_MAX_SIZE = 600
 
 if not os.path.exists(TRASH_DIR): os.makedirs(TRASH_DIR, exist_ok=True)
 if not os.path.exists(IMAGE_FOLDER): os.makedirs(IMAGE_FOLDER, exist_ok=True)
+if not os.path.exists(THUMBNAIL_FOLDER): os.makedirs(THUMBNAIL_FOLDER, exist_ok=True)
 
 # ES 配置
 ELASTICSEARCH_HOSTS = ['http://localhost:9200']
@@ -70,6 +75,9 @@ class DataManager:
         self.synonym_map = {}
         self.synonym_leaf_to_root = {}
         self._load_metadata()
+
+        # 缩略图预检查：启动后台线程生成缺失的缩略图
+        threading.Thread(target=self._generate_missing_thumbnails, daemon=True).start()
 
         # 启动后台同步：负责将文件重命名为 MD5 并同步到 ES
         threading.Thread(target=self._sync_files_to_es, daemon=True).start()
@@ -141,6 +149,78 @@ class DataManager:
             self.synonym_leaf_to_root[main] = main
             for child in children:
                 self.synonym_leaf_to_root[child] = main
+
+    # --- 缩略图工具 ---
+    def _path_join(self, base_dir, relative_path):
+        return os.path.join(base_dir, *relative_path.split('/'))
+
+    def _thumbnail_rel_path(self, filename):
+        base, _ = os.path.splitext(filename)
+        return f"{base}.jpg"
+
+    def _extract_random_frame(self, img: Image.Image):
+        frames = getattr(img, "n_frames", 1)
+        if frames and frames > 1:
+            try:
+                img.seek(random.randrange(frames))
+            except Exception:
+                img.seek(0)
+        return img.copy()
+
+    def _create_thumbnail_file(self, source_path, thumb_path):
+        with Image.open(source_path) as img:
+            frame = self._extract_random_frame(img)
+            if frame.mode not in ("RGB", "L"):
+                frame = frame.convert("RGB")
+            elif frame.mode == "L":
+                frame = frame.convert("RGB")
+
+            frame.thumbnail((THUMBNAIL_MAX_SIZE, THUMBNAIL_MAX_SIZE), Image.LANCZOS)
+            os.makedirs(os.path.dirname(thumb_path), exist_ok=True)
+            frame.save(thumb_path, "JPEG", quality=85, optimize=True)
+
+    def _ensure_thumbnail_exists(self, filename):
+        if not filename:
+            return None
+        thumb_rel = self._thumbnail_rel_path(filename)
+        thumb_full = self._path_join(THUMBNAIL_FOLDER, thumb_rel)
+        src_full = self._path_join(IMAGE_FOLDER, filename)
+        try:
+            if not os.path.exists(src_full):
+                return None
+            if os.path.exists(thumb_full):
+                return thumb_rel
+            self._create_thumbnail_file(src_full, thumb_full)
+            return thumb_rel
+        except Exception as e:
+            print(f"[Thumb] 生成缩略图失败 {thumb_rel}: {e}")
+            traceback.print_exc()
+            return None
+
+    def _build_image_payload(self, filename, tags=None, md5=None, score=None):
+        thumb_rel = self._ensure_thumbnail_exists(filename)
+        thumb_url = f"/thumbnails/{thumb_rel}" if thumb_rel else None
+        data = {
+            "filename": filename,
+            "tags": tags or [],
+            "url": f"/images/{filename}",
+            "thumbnail_url": thumb_url or f"/images/{filename}",
+            "md5": md5 if md5 else os.path.splitext(os.path.basename(filename))[0]
+        }
+        if score is not None:
+            data["score"] = score
+        return data
+
+    def _generate_missing_thumbnails(self):
+        print("[Thumb] 开始检查/补全缩略图...")
+        for root, _, files in os.walk(IMAGE_FOLDER):
+            for fname in files:
+                ext = fname.rsplit('.', 1)[-1].lower() if '.' in fname else ''
+                if ext not in ALLOWED_EXTS:
+                    continue
+                rel = os.path.relpath(os.path.join(root, fname), IMAGE_FOLDER).replace('\\', '/')
+                self._ensure_thumbnail_exists(rel)
+        print("[Thumb] 缩略图检查完成")
 
     # --- 多线程同步与修复逻辑 ---
 
@@ -359,6 +439,7 @@ class DataManager:
                     actions = []
                     for mid in to_add:
                         fname = disk_md5_map[mid]
+                        self._ensure_thumbnail_exists(fname)
                         actions.append({
                             "_index": IMAGE_INDEX,
                             "_id": mid,
@@ -404,13 +485,9 @@ class DataManager:
         hits = res['hits']['hits']
         if hits:
             src = hits[0]['_source']
-            return {
-                "success": True,
-                "filename": src['filename'],
-                "url": f"/images/{src['filename']}",
-                "tags": src.get("tags", []),
-                "md5": src.get("md5", ""),
-            }
+            payload = self._build_image_payload(src['filename'], src.get("tags", []), src.get("md5", ""))
+            payload["success"] = True
+            return payload
         
         # 循环回到开头
         if current_filename:
@@ -424,14 +501,10 @@ class DataManager:
             res = self.es.search(index=IMAGE_INDEX, body={"query": q2, "sort": sort_order, "size": 1})
             if res['hits']['hits']:
                 src = res['hits']['hits'][0]['_source']
-                return {
-                    "success": True,
-                    "filename": src['filename'],
-                    "url": f"/images/{src['filename']}",
-                    "tags": src.get("tags", []),
-                    "md5": src.get("md5", ""),
-                    "message": "循环回到第一张"
-                }
+                payload = self._build_image_payload(src['filename'], src.get("tags", []), src.get("md5", ""))
+                payload["success"] = True
+                payload["message"] = "循环回到第一张"
+                return payload
 
         return {"success": False, "message": "没有更多图片了"}
 
@@ -656,14 +729,17 @@ class DataManager:
         return self._format_es_response(self.es.search(index=IMAGE_INDEX, body=body))
 
     def _format_es_response(self, res):
+        results = []
+        for h in res['hits']['hits']:
+            src = h['_source']
+            results.append(self._build_image_payload(
+                src['filename'],
+                src.get("tags", []),
+                src.get("md5", ""),
+                h.get('_score', 0)
+            ))
         return {
-            "results": [{
-                "filename": h['_source']['filename'],
-                "tags": h['_source'].get("tags", []),
-                "url": f"/images/{h['_source']['filename']}",
-                "md5": h['_source'].get("md5", ""),
-                "score": h.get('_score', 0)
-            } for h in res['hits']['hits']],
+            "results": results,
             "total": res['hits']['total']['value']
         }
 
@@ -675,14 +751,10 @@ class DataManager:
         md5_val = md5_val.lower()
         if self.es.exists(index=IMAGE_INDEX, id=md5_val):
             src = self.es.get(index=IMAGE_INDEX, id=md5_val)['_source']
-            return {
-                "exists": True,
-                "filename": src['filename'],
-                "tags": src.get('tags', []),
-                "url": f"/images/{src['filename']}",
-                "md5": md5_val,
-                "message": "图片已存在（未重复上传）"
-            }
+            payload = self._build_image_payload(src['filename'], src.get('tags', []), md5_val)
+            payload["exists"] = True
+            payload["message"] = "图片已存在（未重复上传）"
+            return payload
         return {"exists": False, "md5": md5_val, "message": "未找到重复图片"}
 
     def check_upload(self, file_obj, provided_md5=None):
@@ -701,11 +773,10 @@ class DataManager:
 
         if self.es.exists(index=IMAGE_INDEX, id=md5_val):
             src = self.es.get(index=IMAGE_INDEX, id=md5_val)['_source']
-            return {
-                "exists": True, "filename": src['filename'], 
-                "tags": src.get('tags', []), "url": f"/images/{src['filename']}", 
-                "md5": md5_val, "message": "图片已存在"
-            }
+            payload = self._build_image_payload(src['filename'], src.get('tags', []), md5_val)
+            payload["exists"] = True
+            payload["message"] = "图片已存在"
+            return payload
         
         original_ext = os.path.splitext(file_obj.filename)[1].lower()
         ext = original_ext[1:] if original_ext.startswith('.') else original_ext
@@ -723,6 +794,7 @@ class DataManager:
         new_filename = f"{md5_val}{original_ext}"
         save_path = os.path.join(IMAGE_FOLDER, new_filename)
         file_obj.save(save_path)
+        self._ensure_thumbnail_exists(new_filename)
         
         try:
             self.es.index(index=IMAGE_INDEX, id=md5_val, body={
@@ -733,10 +805,10 @@ class DataManager:
         except Exception as e:
             print(f"Index error: {e}")
         
-        return {
-            "exists": False, "filename": new_filename, "tags": [], 
-            "url": f"/images/{new_filename}", "md5": md5_val, "message": "上传成功"
-        }
+        payload = self._build_image_payload(new_filename, [], md5_val)
+        payload["exists"] = False
+        payload["message"] = "上传成功"
+        return payload
 
 
 
@@ -757,6 +829,12 @@ class DataManager:
             if os.path.exists(src):
                 # 构造回收站的目标路径 (扁平化路径)
                 dst = os.path.join(TRASH_DIR, basename)
+                thumb_path = self._path_join(THUMBNAIL_FOLDER, self._thumbnail_rel_path(filename))
+                if os.path.exists(thumb_path):
+                    try:
+                        os.remove(thumb_path)
+                    except Exception:
+                        pass
                 
                 # --- 强制覆盖逻辑 ---
                 # 如果回收站里已有同名文件（扁平化容易导致重名），先删掉旧的
@@ -907,6 +985,8 @@ def js(): return send_file('script.js')
 def css(): return send_file('style.css')
 @app.route('/images/<path:f>')
 def img(f): return send_from_directory(IMAGE_FOLDER, f)
+@app.route('/thumbnails/<path:f>')
+def thumbnail(f): return send_from_directory(THUMBNAIL_FOLDER, f)
 
 # [修改点 3] 新增 favicon 路由
 @app.route('/favicon.ico')
@@ -1063,13 +1143,13 @@ def get_image_info():
 
         # 结果处理
         if src:
-            return jsonify({
-                "success": True,
-                "filename": src.get('filename'),
-                "tags": src.get("tags", []),
-                "md5": src.get("md5", md5_query if md5_query else ""),
-                "url": f"/images/{src.get('filename')}"
-            })
+            payload = self._build_image_payload(
+                src.get('filename'),
+                src.get("tags", []),
+                src.get("md5", md5_query if md5_query else "")
+            )
+            payload["success"] = True
+            return jsonify(payload)
         else:
             return jsonify({"success": False, "message": "未找到该图片信息"}), 404
 
@@ -1103,11 +1183,9 @@ def get_by_offset_api():
 
         # 4. 提取数据
         src = res['hits']['hits'][0]['_source']
+        payload = self._build_image_payload(src['filename'], src.get("tags", []), src.get("md5", ""))
         data = {
-            "filename": src['filename'],
-            "tags": src.get("tags", []),
-            "md5": src.get("md5", ""),
-            "url": f"/images/{src['filename']}",
+            **payload,
             "total": res['hits']['total']['value'], # 返回总数
             "offset": offset
         }

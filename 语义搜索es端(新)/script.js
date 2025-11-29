@@ -346,6 +346,7 @@ class MemeApp {
         this.commonTagsCache = this.restoreCommonTagsCache();
         this.taggingHistory = [];
         this.modalManager = new SynonymModalManager(this);
+        this.viewer = null;
         this.init();
     }
 
@@ -628,6 +629,7 @@ class MemeApp {
         this.bindIO();
         
         this.bindSidebarEvents();
+        this.setupImageViewer();
 
         this.switchView('search');
     }
@@ -728,6 +730,7 @@ class MemeApp {
             div.className = "group bg-white rounded-xl overflow-hidden border border-gray-100 hover:shadow-xl hover:shadow-gray-200 transition duration-300 flex flex-col w-full relative";
             
             const md5Display = item.md5 ? item.md5 : '???'; // 如果后端传回空字符串，显示 ???
+            const thumbSrc = item.thumbnail_url || item.url;
 
             // [修改开始]：针对浏览模式启用沉浸式叠加布局
             if (context === 'browse') {
@@ -735,7 +738,7 @@ class MemeApp {
                     <div class="relative bg-gray-100 cursor-pointer overflow-hidden group-inner h-64 w-full flex items-center justify-center">
                         <div class="absolute inset-0 opacity-5" style="background-image: radial-gradient(#000 1px, transparent 1px); background-size: 10px 10px;"></div>
                         
-                        <img src="${item.url}" class="max-w-full max-h-full object-contain transition-transform duration-500 group-hover:scale-105 z-0" onclick="window.open('${item.url}')">
+                        <img src="${thumbSrc}" class="card-image max-w-full max-h-full object-contain transition-transform duration-500 group-hover:scale-105 z-0">
                         
                         <button class="delete-btn absolute top-2 left-2 bg-red-500/80 text-white hover:bg-red-600 p-2 rounded-lg shadow-sm transition opacity-0 group-hover:opacity-100 z-30 backdrop-blur-sm" title="删除图片">
                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
@@ -775,7 +778,7 @@ class MemeApp {
                                     
                     <div class="relative bg-gray-50/50 cursor-pointer overflow-hidden border-b border-gray-50 group-inner h-64 flex items-center justify-center">
                         <div class="absolute inset-0 opacity-5" style="background-image: radial-gradient(#000 1px, transparent 1px); background-size: 10px 10px;"></div>
-                        <img src="${item.url}" class="max-w-full max-h-full object-contain transition-transform duration-500 group-hover:scale-105" onclick="window.open('${item.url}')">
+                        <img src="${thumbSrc}" class="card-image max-w-full max-h-full object-contain transition-transform duration-500 group-hover:scale-105">
                         
                         <button class="delete-btn absolute top-2 left-2 bg-red-50/90 text-red-500 hover:bg-red-500 hover:text-white p-2 rounded-lg shadow-sm transition opacity-0 group-hover:opacity-100 z-10" title="删除图片">
                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
@@ -804,6 +807,12 @@ class MemeApp {
                 if(editBtn) editBtn.onclick = (e) => { e.stopPropagation(); this.editImage(item); };
             }
 
+            const imgEl = div.querySelector('.card-image');
+            if (imgEl) {
+                imgEl.loading = 'lazy';
+                imgEl.onclick = (e) => { e.stopPropagation(); this.openImageViewer(item); };
+            }
+
             div.querySelector('.delete-btn').onclick = async (e) => {
                 e.stopPropagation();
                 if(confirm(`确认将 "${item.filename}" 移入回收站并删除记录？`)) {
@@ -829,6 +838,48 @@ class MemeApp {
 
             return div;
         }
+
+    setupImageViewer() {
+        const container = document.getElementById('image-viewer');
+        if (!container) return;
+        this.viewer = {
+            container,
+            img: container.querySelector('#viewer-img'),
+            filename: container.querySelector('#viewer-filename'),
+            tags: container.querySelector('#viewer-tags'),
+            link: container.querySelector('#viewer-open-raw'),
+            closeBtn: container.querySelector('#viewer-close')
+        };
+
+        container.addEventListener('click', (e) => { if (e.target === container) this.closeImageViewer(); });
+        if (this.viewer.closeBtn) this.viewer.closeBtn.onclick = () => this.closeImageViewer();
+        window.addEventListener('keydown', (e) => { if (e.key === 'Escape') this.closeImageViewer(); });
+    }
+
+    openImageViewer(item) {
+        if (!this.viewer) return;
+        const v = this.viewer;
+        if (v.img) {
+            v.img.src = item.url;
+            v.img.alt = item.filename || '';
+        }
+        if (v.filename) v.filename.textContent = item.filename || '未命名图片';
+        if (v.tags) v.tags.textContent = (item.tags && item.tags.length) ? item.tags.join(', ') : '暂无标签';
+        if (v.link) {
+            v.link.href = item.url;
+            v.link.textContent = '打开原图';
+        }
+        v.container.classList.remove('hidden');
+        v.container.classList.add('flex');
+    }
+
+    closeImageViewer() {
+        if (!this.viewer) return;
+        const v = this.viewer;
+        if (v.img) v.img.src = '';
+        v.container.classList.add('hidden');
+        v.container.classList.remove('flex');
+    }
 
 
     editImage(item) {
