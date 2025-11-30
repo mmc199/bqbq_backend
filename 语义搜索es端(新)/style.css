@@ -147,6 +147,12 @@ body {
     padding-block: 2px;
 }
 
+/* 图片信息弹窗在宽度上随视口变化 */
+.image-info-tooltip {
+    width: min(90%, 320px); /* 宽度基于图片容器，最多 320px */
+    max-width: 100%;
+}
+
 /* 动画 */
 @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes spin { to { transform: rotate(360deg); } }

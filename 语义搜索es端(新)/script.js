@@ -857,7 +857,7 @@ class MemeApp {
                         </button>
 
                         <div class="absolute bottom-2 right-2 z-30 flex flex-col items-end group/info">
-                            <div class="mb-2 hidden group-hover/info:block w-44 p-2.5 bg-gray-900/90 backdrop-blur text-white text-[10px] rounded-lg shadow-xl border border-gray-700 z-40 animate-[fadeIn_0.1s_ease-out]">
+                            <div class="mb-2 hidden group-hover/info:block image-info-tooltip p-2.5 bg-gray-900/90 backdrop-blur text-white text-[10px] rounded-lg shadow-xl border border-gray-700 z-40 animate-[fadeIn_0.1s_ease-out]">
                                 <p class="font-bold text-gray-100 mb-1.5 border-b border-gray-700 pb-1 break-all whitespace-normal leading-tight">${item.filename}</p>
                                 <p class="font-mono text-gray-400 break-all whitespace-normal leading-tight">MD5: ${md5Display}</p>
                             </div>
