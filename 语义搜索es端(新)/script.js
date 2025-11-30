@@ -888,7 +888,7 @@ class MemeApp {
                         <div class="absolute inset-0 opacity-5" style="background-image: radial-gradient(#000 1px, transparent 1px); background-size: 10px 10px;"></div>
                         <img src="${thumbSrc}" class="card-image max-w-full max-h-full object-contain transition-transform duration-500 group-hover:scale-105">
                         
-                        <button class="delete-btn absolute top-2 left-2 bg-red-50/90 text-red-500 hover:bg-red-500 hover:text-white p-2 rounded-lg shadow-sm transition opacity-0 group-hover:opacity-100 z-10" title="删除图片">
+                        <button class="delete-btn absolute top-2 left-2 bg-red-500/80 text-white hover:bg-red-600 p-2 rounded-lg shadow-sm transition opacity-0 group-hover:opacity-100 z-30 backdrop-blur-sm" title="删除图片">
                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
                         </button>
                         
@@ -1042,7 +1042,7 @@ class MemeApp {
                 
                 // 1. Main Tag Text (Truncate)
                 const span = document.createElement('span');
-                span.className = "px-3 truncate max-w-[140px] leading-none";
+                span.className = "px-3 common-tag-text truncate max-w-[140px] leading-none";
                 span.innerText = t;
                 span.onclick = () => {
                     if (context === 'browse') {
