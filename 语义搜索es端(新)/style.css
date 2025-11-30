@@ -2,21 +2,22 @@
 /* --- 导航按钮：实体功能按钮风格 --- */
 /* --- 导航按钮：精致缩小版 (实体风格) --- */
 
-/* 默认状态 (未选中) */
-.nav-btn {
-    /* 布局：更紧凑的尺寸 */
+/* 默认状态 (未选中/选中) */
+.nav-btn,
+.nav-btn-active {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    padding: 6px 12px;          /* 缩小内边距 */
-    font-size: 14px;            /* 缩小字号 (text-xs) */
+    padding: 6px 12px;
+    font-size: 14px;
     font-weight: 700;
-    border-radius: 8px;         /* 减小圆角 (rounded-lg) 以适配小尺寸 */
+    border-radius: 8px;
     white-space: nowrap;
-    cursor: pointer;
     transition: all 0.2s ease;
+}
 
-    /* 外观：保持灰底实体感 */
+.nav-btn {
+    cursor: pointer;
     background-color: #f3f4f6;
     color: #4b5563;
     border: 1px solid #e5e7eb;
@@ -38,27 +39,14 @@
 
 /* 选中状态 (Active) */
 .nav-btn-active {
-    /* 布局：同步缩小 */
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    padding: 6px 12px;          /* 选中时稍微宽一点 */
-    font-size: 14px;            /* 保持 12px */
-    font-weight: 700;
-    border-radius: 8px;         /* 保持 rounded-lg */
-    white-space: nowrap;
     cursor: default;
-    transition: all 0.2s ease;
-
-    /* 外观：保持蓝底高亮 */
     background-color: #2563eb;
     color: white;
     border: 1px solid #2563eb;
-    box-shadow: 0 2px 4px -1px rgba(37, 99, 235, 0.3); /* 阴影也相应调小 */
+    box-shadow: 0 2px 4px -1px rgba(37, 99, 235, 0.3);
     transform: scale(1.02);
 }
-
-* 基础样式 */
+/* 基础样式 */
 body { 
     font-family: "Inter", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; 
     -webkit-font-smoothing: antialiased; 
