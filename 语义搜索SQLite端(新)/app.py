@@ -623,18 +623,16 @@ class DataManager:
         total = len(result_list)
         return {"tags": result_list[offset:offset+limit], "total": total}
 
+
     def _build_search_query(self, include_tags, exclude_tags, min_tags=None, max_tags=None):
-        """构建 SQL 搜索语句，支持包含、排除、数量筛选"""
-        # 核心思想：利用 INTERSECT 和 EXCEPT
-        
-        # 1. Include: MD5 must be in (Images with Tag A) AND (Images with Tag B) ...
+        """构建 SQL 搜索语句，修复括号嵌套导致的语法错误"""
         include_sqls = []
         params = []
         
+        # 1. Include: 包含标签 A, B -> Intersect
         for tag in include_tags:
             variants = self.get_all_variants(tag)
             placeholders = ','.join(['?'] * len(variants))
-            # 查找拥有这些标签任意一个的图片 MD5
             sql = f"""
                 SELECT image_md5 FROM image_tags 
                 JOIN tags ON image_tags.tag_id = tags.id 
@@ -643,7 +641,7 @@ class DataManager:
             include_sqls.append(sql)
             params.extend(variants)
             
-        # 2. Exclude: MD5 must NOT be in (Images with Tag C) ...
+        # 2. Exclude: 排除标签 C -> Except
         exclude_sql = ""
         if exclude_tags:
             all_exclude_variants = []
@@ -659,7 +657,7 @@ class DataManager:
                 """
                 params.extend(all_exclude_variants)
 
-        # 3. Min/Max Tags Count
+        # 3. Min/Max Tags Count -> Intersect
         count_filter_sql = ""
         if min_tags is not None or max_tags is not None:
             p_min = int(min_tags) if min_tags is not None else 0
@@ -671,42 +669,61 @@ class DataManager:
                 HAVING COUNT(*) >= {p_min} AND COUNT(*) <= {p_max}
             """
 
-        # 组合最终 SQL
-        # 基础集合是所有图片
-        final_parts = []
+        # --- 核心修复：扁平化拼接 SQL，移除多余括号 ---
         
+        # 初始集合
+        if include_sqls:
+            # 如果有包含标签，基底就是这些标签的交集
+            # 使用 "\n INTERSECT \n" 连接，避免一行过长
+            md5_set_sql = " \n INTERSECT \n ".join(include_sqls)
+        else:
+            # 如果没有包含标签，基底是“所有图片”
+            # 注意：只有在后续有 exclude 或 count 限制时才需要这个基底，
+            # 如果全空，下面会有优化分支。
+            md5_set_sql = "SELECT md5 FROM images"
+
+        # 叠加排除条件 (A EXCEPT B)
+        if exclude_sql:
+            md5_set_sql = f"{md5_set_sql} \n EXCEPT \n {exclude_sql}"
+            
+        # 叠加数量限制 (A INTERSECT B)
+        if count_filter_sql:
+            md5_set_sql = f"{md5_set_sql} \n INTERSECT \n {count_filter_sql}"
+
+        # 最终组装
         if not include_tags and not exclude_tags and not count_filter_sql:
-            # 无任何条件 -> 所有图片
+            # 无任何筛选 -> 全量查询
             final_sql = "SELECT md5, filename FROM images"
         else:
-            # 有条件 -> 计算 MD5 集合
-            if include_sqls:
-                # Intersect all includes
-                md5_set_sql = " INTERSECT ".join(include_sqls)
-            else:
-                # 如果没有 include，初始集合是所有图片
-                md5_set_sql = "SELECT md5 FROM images"
-
-            if exclude_sql:
-                md5_set_sql = f"({md5_set_sql}) EXCEPT ({exclude_sql})"
-                
-            if count_filter_sql:
-                # 再次取交集 (符合数量限制的)
-                md5_set_sql = f"({md5_set_sql}) INTERSECT ({count_filter_sql})"
-
+            # 有筛选 -> WHERE md5 IN (集合操作结果)
             final_sql = f"SELECT md5, filename FROM images WHERE md5 IN ({md5_set_sql})"
 
         # 自动过滤 Trash (除非显式包含)
         has_trash_in_include = any(TRASH_TAG in self.get_all_variants(t) for t in include_tags)
         if not has_trash_in_include:
-            trash_filter = f"""
-                EXCEPT 
+            # 这里的逻辑是：从最终结果中排除掉 trash
+            # 使用 EXCEPT 语法比嵌套子查询更安全
+            trash_filter_sql = f"""
                 SELECT image_md5 FROM image_tags 
                 JOIN tags ON image_tags.tag_id = tags.id 
                 WHERE tags.name = '{TRASH_TAG}'
             """
-            # 如果 final_sql 已经是复杂查询，我们在最后套一层
-            final_sql = f"SELECT md5, filename FROM images WHERE md5 IN (SELECT md5 FROM ({final_sql}) {trash_filter})"
+            
+            # 构造一个新的查询： (原查询的MD5) EXCEPT (垃圾箱MD5)
+            # 然后再取这些 MD5 的完整信息
+            # 为了避免深层嵌套，我们修改 final_sql 的结构
+            
+            # 方法：将 trash 过滤直接作为 SQL 的一部分
+            # 既然 final_sql 是 "SELECT ... WHERE md5 IN (...)"
+            # 我们可以直接在 IN 内部追加 EXCEPT
+            
+            if "WHERE md5 IN" in final_sql:
+                # 截掉最后的 ')'
+                inner_query = final_sql.rsplit(')', 1)[0] 
+                final_sql = f"{inner_query} \n EXCEPT \n {trash_filter_sql})"
+            else:
+                # 全量查询的情况
+                final_sql = f"SELECT md5, filename FROM images WHERE md5 IN (SELECT md5 FROM images EXCEPT {trash_filter_sql})"
 
         return final_sql, params
 
