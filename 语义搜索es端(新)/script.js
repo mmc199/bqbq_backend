@@ -964,9 +964,7 @@ class MemeApp {
         if (!container) return;
         this.viewer = {
             container,
-            img: container.querySelector('#viewer-img'),
-            filename: container.querySelector('#viewer-filename'),
-            tags: container.querySelector('#viewer-tags'),
+            slot: container.querySelector('#viewer-card-slot'),
             link: container.querySelector('#viewer-open-raw'),
             closeBtn: container.querySelector('#viewer-close')
         };
@@ -979,12 +977,17 @@ class MemeApp {
     openImageViewer(item) {
         if (!this.viewer) return;
         const v = this.viewer;
-        if (v.img) {
-            v.img.src = item.url;
-            v.img.alt = item.filename || '';
+        if (v.slot) {
+            v.slot.innerHTML = '';
+            const cardData = Object.assign({}, item, { thumbnail_url: item.url });
+            const card = this.createCard(cardData, 'browse');
+            card.classList.add('viewer-card-instance');
+            const viewerImg = card.querySelector('.card-image');
+            if (viewerImg) {
+                viewerImg.onclick = (e) => e.stopPropagation();
+            }
+            v.slot.appendChild(card);
         }
-        if (v.filename) v.filename.textContent = item.filename || '未命名图片';
-        if (v.tags) v.tags.textContent = (item.tags && item.tags.length) ? item.tags.join(', ') : '暂无标签';
         if (v.link) {
             v.link.href = item.url;
             v.link.textContent = '打开原图';
@@ -996,11 +999,10 @@ class MemeApp {
     closeImageViewer() {
         if (!this.viewer) return;
         const v = this.viewer;
-        if (v.img) v.img.src = '';
+        if (v.slot) v.slot.innerHTML = '';
         v.container.classList.add('hidden');
         v.container.classList.remove('flex');
     }
-
 
     editImage(item) {
         // [修改] 重构整个 editImage 方法
@@ -1165,6 +1167,7 @@ class MemeApp {
             const hintEl = document.getElementById('search-hint-text');
             const labelEl = document.getElementById('search-input-label');
             const excludeWrapper = document.getElementById('search-exclude-wrapper');
+            const countEl = document.getElementById('results-count');
 
             const updateSearchUI = () => {
                 const isSemantic = toggle.checked;
@@ -1197,12 +1200,26 @@ class MemeApp {
             
             updateSearchUI(); // 初始执行一次，确保 UI 与读取到的状态一致
 
-            const doSearch = async (append) => {
-                const s = this.state.search;
-                const grid = document.getElementById('results-grid');
-                const loadMore = document.getElementById('search-load-more');
-                const countEl = document.getElementById('results-count');
-                if (!append) { s.offset = 0; grid.innerHTML = ''; }
+        const normalizeTotalValue = (value) => {
+            const parsed = Number(value);
+            return Number.isFinite(parsed) ? parsed : 0;
+        };
+
+        const updateSearchCounter = (loaded, total) => {
+            if(!countEl) return;
+            const totalValue = normalizeTotalValue(total);
+            countEl.textContent = `${loaded} / ${totalValue}`;
+        };
+
+        const doSearch = async (append) => {
+            const s = this.state.search;
+            const grid = document.getElementById('results-grid');
+            const loadMore = document.getElementById('search-load-more');
+            if (!append) {
+                s.offset = 0;
+                grid.innerHTML = '';
+                updateSearchCounter(0, 0);
+            }
                 
                 // 支持: 空格, 英文逗号, 中文逗号, 中文顿号
                 const splitRegex = /[ ,，、]+/;
@@ -1234,10 +1251,11 @@ class MemeApp {
                 btn.innerHTML = originalText;
                 
                 if (res) {
-                    countEl.textContent = `${res.total} 结果`;
                     res.results.forEach(r => grid.appendChild(this.createCard(r)));
                     s.offset += res.results.length;
-                    loadMore.classList.toggle('hidden', s.offset >= res.total);
+                    const totalValue = normalizeTotalValue(res.total);
+                    updateSearchCounter(grid.childElementCount, totalValue);
+                    loadMore.classList.toggle('hidden', s.offset >= totalValue);
                 }
             };
             
