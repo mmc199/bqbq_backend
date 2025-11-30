@@ -9,6 +9,8 @@ const debounce = (func, wait) => {
     };
 };
 
+const TRASH_TAG = 'trash_bin';
+
 /**
  * 轻量 MD5（改自 blueimp-md5，支持 ArrayBuffer）
  */
@@ -933,19 +935,28 @@ class MemeApp {
                 deleteBtn.classList.toggle('text-white', true);
                 deleteBtn.onclick = async (e) => {
                     e.stopPropagation();
-                    const actionLabel = isTrashedBtn ? '恢复' : '移除';
-                    if (!await this.customConfirm(actionLabel + ' "' + item.filename + '"？')) return;
-                    const res = await this.api('/api/delete_image', {
+                    const actionLabel = isTrashedBtn ? '恢复' : '删除';
+                    if (!await this.customConfirm(actionLabel + ' "' + item.filename + '"?')) return;
+                    const tagSet = new Set(item.tags || []);
+                    if (isTrashedBtn) {
+                        tagSet.delete(TRASH_TAG);
+                    } else {
+                        tagSet.add(TRASH_TAG);
+                    }
+                    const res = await this.api('/api/save_tags', {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({filename: item.filename, restore: isTrashedBtn})
+                        body: JSON.stringify({
+                            filename: item.filename,
+                            tags: Array.from(tagSet)
+                        })
                     });
                     if (!res) return;
                     if (!res.success) {
                         this.toast(res.message || (actionLabel + '失败'), 'error');
                         return;
                     }
-                    this.toast(res.message || (isTrashedBtn ? '已恢复' : '已移入回收站'));
+                    this.toast(res.message || (isTrashedBtn ? '已恢复' : '删除成功'));
                     if (context === 'browse') {
                         div.remove();
                     } else if (context === 'tagging') {
@@ -1130,10 +1141,12 @@ class MemeApp {
     async discardPendingUpload() {
         const s = this.state.upload;
         if (s.pending && s.file) {
-            await this.api('/api/delete_image', {
+            const tagSet = new Set(s.tags);
+            tagSet.add(TRASH_TAG);
+            await this.api('/api/save_tags', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({filename: s.file})
+                body: JSON.stringify({filename: s.file, tags: Array.from(tagSet)})
             });
         }
         if (s.localUrl) {

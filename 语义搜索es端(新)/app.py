@@ -247,6 +247,37 @@ class DataManager:
         except Exception as e:
             print(f"[Thumb Move] 无法移动缩略图: {e}")
 
+
+    def _normalize_rel_path(self, rel_path):
+        if not rel_path:
+            return ''
+        return rel_path.replace('\\', '/').strip('/')
+
+    def _relocate_image(self, src_rel, dst_rel):
+        src_rel = self._normalize_rel_path(src_rel)
+        dst_rel = self._normalize_rel_path(dst_rel)
+        if not src_rel or not dst_rel:
+            raise ValueError("来源或目标路径不能为空")
+        if src_rel == dst_rel:
+            return dst_rel
+        src_abs = self._path_join(IMAGE_FOLDER, src_rel)
+        if not os.path.exists(src_abs):
+            raise FileNotFoundError(f"源文件不存在: {src_rel}")
+        dst_abs = self._path_join(IMAGE_FOLDER, dst_rel)
+        dst_dir = os.path.dirname(dst_abs)
+        if dst_dir and not os.path.exists(dst_dir):
+            os.makedirs(dst_dir, exist_ok=True)
+        if os.path.abspath(src_abs) == os.path.abspath(dst_abs):
+            return dst_rel
+        if os.path.exists(dst_abs):
+            try:
+                os.remove(dst_abs)
+            except Exception as e:
+                print(f"[Relocate Image] 删除目标文件失败: {e}")
+        shutil.move(src_abs, dst_abs)
+        self._move_thumbnail_file(src_rel, dst_rel)
+        return dst_rel
+
     def _build_image_payload(self, filename, tags=None, md5=None, score=None):
         thumb_rel = self._ensure_thumbnail_exists(filename)
         thumb_url = f"/thumbnails/{thumb_rel}" if thumb_rel else None
@@ -584,18 +615,64 @@ class DataManager:
 
 
     def save_tags(self, filename, tags):
-        # filename 可能是 "subdir/md5.jpg"
-        # 我们需要提取 "md5" 作为 doc_id
-        basename = os.path.basename(filename)
-        doc_id = basename.rsplit('.', 1)[0]
-        
-        cleaned_tags = sorted(list(set([t.strip() for t in tags if t.strip()])))
+        if not filename:
+            return {"success": False, "message": "缺少 filename 参数"}
+
+        normalized_filename = filename.replace('\\', '/').strip('/')
+        if not normalized_filename:
+            return {"success": False, "message": "无效的文件路径"}
+
+        doc_id = os.path.basename(normalized_filename).rsplit('.', 1)[0]
+        tag_candidates = tags if isinstance(tags, (list, tuple, set)) else []
+        cleaned_tags = sorted({str(t).strip() for t in tag_candidates if str(t).strip()})
+        should_be_trash = TRASH_TAG in cleaned_tags
+
         try:
-            self.es.update(index=IMAGE_INDEX, id=doc_id, body={"doc": {"tags": cleaned_tags}})
-            return {"success": True}
+            doc_src = self.es.get(index=IMAGE_INDEX, id=doc_id)['_source']
+        except es_exceptions.NotFoundError:
+            doc_src = {}
         except Exception as e:
-            print(f"Save tags error: {e}")
-            return {"success": False}
+            print(f"[Save Tags] 获取索引失败: {e}")
+            traceback.print_exc()
+            return {"success": False, "message": "查询索引失败"}
+
+        current_path = doc_src.get('filename') or normalized_filename
+        currently_in_trash = self._is_trash_path(current_path)
+        final_path = current_path
+        action = None
+        try:
+            if should_be_trash and not currently_in_trash:
+                final_path = self._relocate_image(current_path, f"{TRASH_SUBDIR}/{current_path}")
+                action = 'trash'
+            elif not should_be_trash and currently_in_trash:
+                prefix = f"{TRASH_SUBDIR}/"
+                restored = current_path[len(prefix):] if current_path.startswith(prefix) else current_path
+                restored = restored.lstrip('/')
+                final_path = self._relocate_image(
+                    current_path,
+                    restored if restored else os.path.basename(current_path)
+                )
+                action = 'restore'
+        except Exception as e:
+            print(f"[Save Tags] 移动文件失败: {e}")
+            traceback.print_exc()
+            return {"success": False, "message": f"文件移动失败: {str(e)}"}
+
+        final_tags = self._ensure_trash_tag(cleaned_tags, should_be_trash)
+        update_doc = {"filename": final_path, "tags": final_tags, "md5": doc_id}
+        try:
+            self.es.update(index=IMAGE_INDEX, id=doc_id, body={"doc": update_doc, "doc_as_upsert": True})
+        except Exception as e:
+            print(f"[Save Tags] 更新索引失败: {e}")
+            traceback.print_exc()
+            return {"success": False, "message": "ES更新失败"}
+
+        message = "标签已保存"
+        if action == 'trash':
+            message = "已移入回收站"
+        elif action == 'restore':
+            message = "已恢复"
+        return {"success": True, "message": message}
 
     def get_common_tags(self, limit=100, offset=0, query=""):
         body = {
@@ -892,65 +969,6 @@ class DataManager:
 
 
 
-    def delete_image_file(self, filename, restore=False):
-        rel_path = ((filename or '').replace('\\', '/')).strip('/')
-        if not rel_path:
-            return False, "缺少图片路径"
-        doc_id = os.path.basename(rel_path).rsplit('.', 1)[0]
-        if restore:
-            if not self._is_trash_path(rel_path):
-                return False, "该图片不在回收站"
-            prefix = f"{TRASH_SUBDIR}/"
-            dst_rel = rel_path[len(prefix):] if rel_path.startswith(prefix) else rel_path
-        else:
-            if self._is_trash_path(rel_path):
-                return False, "该图片已在回收站"
-            dst_rel = f"{TRASH_SUBDIR}/{rel_path}" if rel_path else TRASH_SUBDIR
-        src_rel = rel_path
-        src_abs = self._path_join(IMAGE_FOLDER, src_rel)
-        dst_abs = self._path_join(IMAGE_FOLDER, dst_rel)
-        if not os.path.exists(src_abs):
-            return False, "源文件不存在"
-        dst_dir = os.path.dirname(dst_abs)
-        if dst_dir and not os.path.exists(dst_dir):
-            os.makedirs(dst_dir, exist_ok=True)
-        if restore:
-            if os.path.exists(dst_abs):
-                return False, "目标路径已有文件，请先处理冲突"
-        else:
-            if os.path.exists(dst_abs):
-                try:
-                    os.remove(dst_abs)
-                except Exception as e:
-                    print(f"[Delete Image] 无法提前删除目标文件: {e}")
-        try:
-            shutil.move(src_abs, dst_abs)
-        except Exception as e:
-            print(f"[Delete Image] 移动文件失败: {e}")
-            return False, str(e)
-        self._move_thumbnail_file(src_rel, dst_rel)
-        tags = []
-        try:
-            src_doc = self.es.get(index=IMAGE_INDEX, id=doc_id)['_source']
-            tags = src_doc.get('tags', []) or []
-        except es_exceptions.NotFoundError:
-            tags = []
-        except Exception as e:
-            print(f"[Delete Image] 读取索引失败: {e}")
-        keep_trash = not restore
-        new_tags = self._ensure_trash_tag(tags, keep_trash)
-        update_doc = {
-            "filename": dst_rel,
-            "tags": new_tags,
-            "md5": doc_id,
-        }
-        try:
-            self.es.update(index=IMAGE_INDEX, id=doc_id, body={"doc": update_doc, "doc_as_upsert": True})
-        except Exception as e:
-            print(f"[Delete Image] 更新索引失败: {e}")
-        message = "已恢复" if restore else "已移入回收站"
-        return True, message
-
     def update_tag_group(self, main_tag, synonyms):
         self.synonym_map[main_tag] = synonyms
         for s in synonyms:
@@ -1147,16 +1165,6 @@ def import_data():
         traceback.print_exc()
         return jsonify({"success": False, "message": str(e)}), 400
     
-@app.route('/api/delete_image', methods=['POST'])
-def del_img():
-    data = request.get_json(force=True, silent=True) or {}
-    filename = data.get('filename')
-    if not filename:
-        return jsonify({"success": False, "message": "缺少 filename 参数"}), 400
-    restore = bool(data.get('restore'))
-    success, message = dm.delete_image_file(filename, restore=restore)
-    return jsonify({"success": success, "message": message})
-
 @app.route('/api/check_md5_exists')
 def chk_md5():
     return jsonify(dm.check_md5_exists(request.args.get('md5', '').strip()))
