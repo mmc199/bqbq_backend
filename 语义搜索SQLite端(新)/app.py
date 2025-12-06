@@ -2,7 +2,15 @@
 import os
 import json
 import hashlib
+
+
 import shutil
+
+import sys
+
+import time
+
+
 import threading
 import traceback
 import concurrent.futures
@@ -10,11 +18,15 @@ import random
 import sqlite3
 from typing import List, Dict, Any, Set
 
+# 新增: 导入 dotenv
+from dotenv import load_dotenv
+
 # 新增依赖: pip install jieba
 import jieba
 
 from flask import Flask, send_file, send_from_directory, request, jsonify, Response, stream_with_context, redirect
 from PIL import Image
+from flask_cors import CORS
 
 # =========================
 # 1. 配置与常量
@@ -37,8 +49,77 @@ os.makedirs(DB_DIR, exist_ok=True)
 
 ALLOWED_EXTS = {'jpg', 'jpeg', 'png', 'gif', 'webp'}
 
+# 同步分析相关参数说明：
+#   SYNC_ANALYSIS_BATCH_SIZE：每次线程池分配给子批的文件数量，数越大 CPU 利用越高但日志越少，环境变量能临时调小方便 debug。
+#   SYNC_ANALYSIS_WORKERS：用于并发分析文件的线程数，通常设置为 CPU 核心数的 1~2 倍即可。
+#   SYNC_MAX_FILES_PER_RUN：本次 sync 最多处理的文件数量，设为 <=0 表示不限制，每次执行会扫描到所有待分析文件。
+SYNC_ANALYSIS_BATCH_SIZE = int(os.getenv('SYNC_ANALYSIS_BATCH_SIZE', '50'))
+SYNC_ANALYSIS_WORKERS = int(os.getenv('SYNC_ANALYSIS_WORKERS', '16'))
+# 0 或负值代表不限制，其它值会截断待处理列表，避免单次耗时过久。
+SYNC_MAX_FILES_PER_RUN = int(os.getenv('SYNC_MAX_FILES_PER_RUN', '0'))
+
 # 初始化 Jieba 分词 (首次运行会加载字典)
 jieba.initialize()
+
+
+
+# 获取终端宽度，用于计算需要填充多少空格来覆盖旧文字
+
+
+def _print_status(msg, is_error=False):
+    """
+    修复了 ljust 导致中文换行问题的版本
+    """
+    import shutil
+    import sys
+
+    # 1. 获取终端宽度 (保留 1 字符余量非常重要)
+    try:
+        terminal_width = shutil.get_terminal_size((80, 20)).columns - 1
+    except:
+        terminal_width = 79
+
+    if is_error:
+        # 错误逻辑：清空行 -> 打印错误 -> 换行
+        # 这里用 ' ' * terminal_width 清空是安全的
+        sys.stdout.write(f"\r{' ' * terminal_width}\r")
+        sys.stdout.write(f"{msg}\n")
+    else:
+        # --- 计算实际显示宽度 ---
+        display_len = 0
+        for char in msg:
+            if ord(char) > 127: 
+                display_len += 2
+            else: 
+                display_len += 1
+        
+        # --- 截断逻辑 ---
+        if display_len > terminal_width:
+            # 如果过长，进行截断
+            keep_tail = max(10, terminal_width - 25)
+            msg = msg[:15] + "..." + msg[-keep_tail:]
+            
+            # 【重要】截断后，必须重新计算 display_len，否则下面的填充计算会错
+            display_len = 0
+            for char in msg:
+                if ord(char) > 127: display_len += 2
+                else: display_len += 1
+
+        # --- 【核心修复】手动计算填充空格 ---
+        # 我们希望总视觉宽度等于 terminal_width
+        # 需要填充的空格数 = 终端宽度 - 当前字符串的视觉宽度
+        pad_len = max(0, terminal_width - display_len)
+        padding = " " * pad_len
+
+        # 输出：\r + 消息 + 填充空格
+        sys.stdout.write(f"\r{msg}{padding}")
+        
+    sys.stdout.flush()
+
+
+
+
+
 
 def calculate_md5(file_path=None, file_stream=None):
     hash_md5 = hashlib.md5()
@@ -72,30 +153,33 @@ class DBHandler:
         conn.execute("PRAGMA journal_mode=WAL;") 
         return conn
 
+
     def _init_tables(self):
         conn = self.get_conn()
         cursor = conn.cursor()
         
-        # 1. 图片主表
+        # 1. 图片主表 (已移除 created_at)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS images (
                 md5 TEXT PRIMARY KEY,
-                filename TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                filename TEXT NOT NULL
             )
         ''')
         # 创建 filename 索引加速排序
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_filename ON images (filename)')
 
-        # 2. 标签表
+        # 2. 标签表 (新增 ref_count 字段用于高性能统计)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS tags (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT UNIQUE NOT NULL
+                name TEXT UNIQUE NOT NULL,
+                ref_count INTEGER DEFAULT 0
             )
         ''')
-        # 创建 name 索引
+        # 创建 name 索引 (用于查找)
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_tag_name ON tags (name)')
+        # [新增] 创建 ref_count 索引 (用于 get_common_tags 极速排序)
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_tag_ref_count ON tags (ref_count DESC)')
 
         # 3. 图片-标签关联表
         cursor.execute('''
@@ -108,13 +192,37 @@ class DBHandler:
             )
         ''')
         
-        # 4. 同义词表 (扁平化存储: main_tag -> synonym)
+        # 4. 同义词表
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS synonyms (
                 main_tag TEXT,
                 synonym TEXT,
                 PRIMARY KEY (main_tag, synonym)
             )
+        ''')
+
+        # ================= [新增] 自动维护计数的触发器 =================
+        
+        # 触发器 A: 当图片打上标签时，计数 +1
+        cursor.execute('''
+            CREATE TRIGGER IF NOT EXISTS update_ref_count_inc 
+            AFTER INSERT ON image_tags 
+            BEGIN
+                UPDATE tags 
+                SET ref_count = ref_count + 1 
+                WHERE id = NEW.tag_id;
+            END;
+        ''')
+        
+        # 触发器 B: 当标签被移除时 (或图片删除级联移除时)，计数 -1
+        cursor.execute('''
+            CREATE TRIGGER IF NOT EXISTS update_ref_count_dec 
+            AFTER DELETE ON image_tags 
+            BEGIN
+                UPDATE tags 
+                SET ref_count = ref_count - 1 
+                WHERE id = OLD.tag_id;
+            END;
         ''')
         
         conn.commit()
@@ -125,21 +233,40 @@ class DBHandler:
 # =========================
 
 class DataManager:
+    """核心数据管理器：处理图片、标签、同义词等逻辑"""
+
     def __init__(self):
-        print("[DataManager] 初始化 (SQLite 版)...")
+        # [清理] 移除了所有参数，初始化时保持绝对静默
+        _print_status("[DataManager] 初始化 (静态资源就绪)...\n")
         self.db = DBHandler(DB_PATH)
         
         # 任务锁：用于互斥“后台自动扫描”和“手动导入/导出”
         self.task_lock = threading.Lock()
         
-        # 内存缓存同义词，减少数据库查询
-        self.synonym_map = {} # {main: [syn1, syn2]}
-        self.synonym_leaf_to_root = {} # {syn1: main, main: main}
-        self._load_metadata()
+        # 标志位：记录扫描线程是否已启动
+        self.scan_thread_started = False
 
-        # 启动后台任务
-        threading.Thread(target=self._generate_missing_thumbnails, daemon=True).start()
-        threading.Thread(target=self._sync_files_to_db, daemon=True).start()
+        # 内存缓存同义词
+        self.synonym_map = {} 
+        self.synonym_leaf_to_root = {} 
+        self._load_metadata()
+        
+        # 注意：这里不再启动任何线程，完全由 start_scan_thread 控制
+
+
+    def start_scan_thread(self):
+        """统一启动入口：安全启动后台扫描线程和缩略图生成"""
+        if not self.scan_thread_started:
+            self.scan_thread_started = True
+            _print_status("[System] 正在启动后台服务 (扫描 + 缩略图)...\n")
+            
+            # 1. 启动缩略图生成
+            threading.Thread(target=self._generate_missing_thumbnails, daemon=True).start()
+            
+            # 2. 启动核心同步扫描
+            threading.Thread(target=self._sync_files_to_db, daemon=True).start()
+
+
 
     def _load_metadata(self):
         """从 SQLite 加载同义词到内存"""
@@ -266,139 +393,236 @@ class DataManager:
             self._create_thumbnail_file(src_full, thumb_full)
             return thumb_rel
         except Exception as e:
-            print(f"[Thumb Error] {thumb_rel}: {e}")
+            _print_status(f"[Thumb] 生成缩略图失败 {thumb_rel}: {e}", is_error=True)
             return None
 
     def _generate_missing_thumbnails(self):
-        print("[Thumb] 开始检查缩略图...")
+        _print_status("[Thumb] 开始检查/补全缩略图...\n")
         for root, _, files in os.walk(IMAGE_FOLDER):
             for fname in files:
                 if fname.rsplit('.', 1)[-1].lower() in ALLOWED_EXTS:
                     rel = os.path.relpath(os.path.join(root, fname), IMAGE_FOLDER).replace('\\', '/')
                     self._ensure_thumbnail_exists(rel)
-        print("[Thumb] 完成")
+        _print_status("[Thumb] 缩略图检查完成\n")
 
     # --- 核心同步逻辑 (DB版) ---
 
+
+
     def _process_file_standardization(self, file_path):
-        """计算MD5并重命名"""
+        """
+        计算MD5，校验真实格式，并标准化重命名。
+        [修改版]：移除了后缀名初筛，只要内容是图片都能识别并修复。
+        """
         try:
             dir_path = os.path.dirname(file_path)
             fname = os.path.basename(file_path)
-            if '.' not in fname: return None
-            ext = fname.rsplit('.', 1)[1].lower()
-            if ext not in ALLOWED_EXTS: return None
+            
+            # ================= [PIL 真实格式校验] =================
+            # 我们直接尝试打开文件，不关心它原来的后缀是什么
+            # 哪怕是 "readme.txt" 或 "data"，只要内容是图片，这里就能通过
+            real_ext = None
+            try:
+                with Image.open(file_path) as img:
+                    format_name = img.format.lower() if img.format else ""
+                    
 
+                    # 只要识别出的格式在允许列表里，就直接用它
+                    if format_name in ALLOWED_EXTS:
+                        real_ext = format_name
+                        if real_ext == 'jpeg': 
+                            real_ext = 'jpg'
+                    
+
+            except Exception:
+                # 无法用 PIL 打开，说明文件头损坏、不是图片、或者文件为空
+                # 这里静默跳过，不报错，因为文件夹里可能有正常的非图片文件（如 .gitignore）
+                return None
+            
+            # 如果没获取到后缀（理论上上面逻辑会返回），则跳过
+            if not real_ext: 
+                return None
+            # ========================================================
+
+            # 2. 计算 MD5
             md5_val = calculate_md5(file_path=file_path)
-            expected_name = f"{md5_val}.{ext}"
+            
+            # 3. 构造期望文件名 (使用校验后的 real_ext)
+            expected_name = f"{md5_val}.{real_ext}"
+            
             final_name_in_dir = expected_name
             
+            # 4. 重命名逻辑
             if fname != expected_name:
                 new_full_path = os.path.join(dir_path, expected_name)
                 try:
+                    # 如果目标文件名已存在
                     if not os.path.exists(new_full_path):
                         os.rename(file_path, new_full_path)
+                        _print_status(f"[Sync] 修正文件/后缀: {fname} -> {expected_name}\n")
                     else:
-                        os.remove(file_path) # 重复文件删除
-                except OSError:
+                        # 目标已存在，说明是重复文件，删除当前这个
+                        old_rel = os.path.relpath(file_path, IMAGE_FOLDER).replace('\\', '/')
+                        new_rel = os.path.relpath(new_full_path, IMAGE_FOLDER).replace('\\', '/')
+                        _print_status(f"[Sync] 去重: 已删除重复文件 {old_rel} (保留 {new_rel})\n")
+                        os.remove(file_path) 
+                except OSError as e:
+                    _print_status(f"[Sync] 重命名失败 {fname}: {e}", is_error=True)
                     return None 
             
             abs_final_path = os.path.join(dir_path, final_name_in_dir)
             rel_path = os.path.relpath(abs_final_path, IMAGE_FOLDER).replace('\\', '/')
             return (md5_val, rel_path)
+
         except Exception:
+            # 捕获其他非预期的系统错误（如权限问题）
             traceback.print_exc()
             return None
 
+
+
     def _sync_files_to_db(self):
-        """后台同步：磁盘文件 <-> SQLite"""
+        """后台同步：磁盘文件 <-> SQLite (高性能 Map-Reduce 版)"""
         with self.task_lock:
-            print("[Sync] 开始同步...")
+            # ... (这部分获取 db_files 和 disk_md5_map 的代码保持不变) ...
+            _print_status("[Sync] 已获得锁，开始执行同步...\n")
             conn = self.db.get_conn()
             try:
                 # 1. 获取 DB 现状
-                db_files = {} # md5 -> filename
+                db_files = {} 
                 cursor = conn.cursor()
                 cursor.execute("SELECT md5, filename FROM images")
                 for row in cursor.fetchall():
                     db_files[row['md5']] = row['filename']
                 
-                # 2. 扫描磁盘
-                disk_md5_map = {} # md5 -> rel_path
-                files_to_process = []
+                _print_status(f"[Sync] DB 已索引 {len(db_files)} 张图片\n")
                 
+                # 2. 扫描磁盘 - 收集待处理列表
+                disk_md5_map = {} 
+                files_to_process = [] # 这里只存路径
+                total_disk_files = 0
+                matched_cached = 0
+               
                 if os.path.exists(IMAGE_FOLDER):
                     for root, dirs, files in os.walk(IMAGE_FOLDER):
                         for fname in files:
+                            total_disk_files += 1
                             full_path = os.path.join(root, fname)
                             fname_base = os.path.basename(fname)
                             fname_stem = fname_base.rsplit('.', 1)[0]
                             
-                            # 假设文件名是 MD5 (快速检查)
+                            # 捷径逻辑 (保留以提高速度)
                             if fname_stem in db_files:
-                                rel = os.path.relpath(full_path, IMAGE_FOLDER).replace('\\', '/')
-                                disk_md5_map[fname_stem] = rel
-                            else:
-                                files_to_process.append(full_path)
+                                db_filename = db_files[fname_stem]
+                                db_ext = os.path.splitext(db_filename)[1].lower().lstrip('.')
+                                current_ext = fname.rsplit('.', 1)[1].lower() if '.' in fname else ''
+                                
+                                if db_ext == current_ext:
+                                    # 完全匹配，直接登记
+                                    rel = os.path.relpath(full_path, IMAGE_FOLDER).replace('\\', '/')
+                                    disk_md5_map[fname_stem] = rel
+                                    matched_cached += 1
+                                    continue
+                            
+                            # 未命中捷径，加入待处理
+                            files_to_process.append(full_path)
+                _print_status(f"[Sync] 磁盘扫描: {total_disk_files} 个文件, {matched_cached} 个从 DB 缓存命中, {len(files_to_process)} 个待分析\n")
+                # ========================================================
+                # Phase 1: 批次化并行分析
+                # ========================================================
+                total_candidates = len(files_to_process)
+                if SYNC_MAX_FILES_PER_RUN > 0:
+                    max_run = min(total_candidates, SYNC_MAX_FILES_PER_RUN)
+                    if total_candidates > max_run:
+                        _print_status(f"[Sync] 受限于 SYNC_MAX_FILES_PER_RUN={SYNC_MAX_FILES_PER_RUN}，本次只处理 {max_run} 个文件。\n")
+                else:
+                    max_run = total_candidates
+                files_to_process = files_to_process[:max_run]
+                total_to_process = len(files_to_process)
+                if total_candidates:
+                    _print_status(f"[Sync] 本次扫描共发现 {total_candidates} 个未缓存文件，准备处理 {total_to_process} 个 (批次大小 {SYNC_ANALYSIS_BATCH_SIZE})。\n")
+                    if total_candidates > total_to_process:
+                        _print_status(f"[Sync] 其余 {total_candidates - total_to_process} 个留待下一次扫描。\n")
+                else:
+                    _print_status("[Sync] Phase 1: 暂无新文件待分析。\n")
+                if total_to_process:
+                    processed_global = 0
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=SYNC_ANALYSIS_WORKERS) as executor:
+                        for batch_start in range(0, total_to_process, SYNC_ANALYSIS_BATCH_SIZE):
+                            batch = files_to_process[batch_start:batch_start + SYNC_ANALYSIS_BATCH_SIZE]
+                            batch_end = batch_start + len(batch)
+                            futures = {executor.submit(self._process_file_standardization, f): f for f in batch}
+                            valid = 0
+                            for future in concurrent.futures.as_completed(futures):
+                                res = future.result()
+                                processed_global += 1
+                                if res:
+                                    md5_val, rel_path = res
+                                    disk_md5_map[md5_val] = rel_path
+                                    valid += 1
+                            invalid_count = len(batch) - valid
+                            processed_msg = f"{processed_global}/{total_candidates}"
+                            if valid:
+                                _print_status(f"[Sync] {processed_msg} - 批次 {batch_start + 1}-{batch_end} 解析成功 {valid}/{len(batch)}")
+                            if invalid_count:
+                                _print_status(f"[Sync] {processed_msg} - 批次 {batch_start + 1}-{batch_end} 跳过 {invalid_count} 个无效文件。\n")
+                    _print_status(f"[Sync] Phase 1 完成: 已处理 {processed_global}/{total_candidates} 个文件。\n")
 
-                # 3. 处理未知/改名文件
-                if files_to_process:
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-                        future_to_file = {executor.submit(self._process_file_standardization, f): f for f in files_to_process}
-                        for future in concurrent.futures.as_completed(future_to_file):
-                            res = future.result()
-                            if res:
-                                md5_val, rel_path = res
-                                disk_md5_map[md5_val] = rel_path
-
-                # 4. 计算差异
+                # ========================================================
+                # Phase 2: 继续与数据库比较
+                # ========================================================
                 disk_ids = set(disk_md5_map.keys())
                 db_ids = set(db_files.keys())
                 
                 to_add = disk_ids - db_ids
                 to_delete = db_ids - disk_ids
-                to_update_path = [] # (md5, new_path)
+                to_update_path = []
                 
-                # 检查路径变化
                 for mid in disk_ids & db_ids:
                     if db_files[mid] != disk_md5_map[mid]:
                         to_update_path.append((mid, disk_md5_map[mid]))
-                        # 顺便检查是否需要加/减 trash 标签
                         new_is_trash = self._is_trash_path(disk_md5_map[mid])
-                        # 获取旧 tag，这一步比较耗时，但为了准确性需要做
-                        # 优化：可以稍后在业务逻辑中 lazy update，或者这里统一 update
-                        # 这里简化处理：如果是路径变动，强制根据路径刷新 trash 标签状态
                         self._sync_trash_tag_in_db(conn, mid, new_is_trash)
 
-                # 5. 执行 DB 变更
+                _print_status(f"[Sync] Phase 2 差异 -> 新增 {len(to_add)} 张, 删除 {len(to_delete)} 张, 路径更新 {len(to_update_path)} 条\n")
+                if not (to_add or to_delete or to_update_path):
+                    _print_status("[Sync] Phase 2: 无需更新数据库记录。\n")
+
                 if to_delete:
-                    print(f"[Sync] 删除失效记录: {len(to_delete)}")
                     conn.executemany("DELETE FROM images WHERE md5 = ?", [(x,) for x in to_delete])
-                    # image_tags 会因为 DELETE CASCADE 自动清理
                 
                 if to_update_path:
-                    print(f"[Sync] 更新路径: {len(to_update_path)}")
-                    for mid, new_p in to_update_path:
-                        conn.execute("UPDATE images SET filename = ? WHERE md5 = ?", (new_p, mid))
+                    # 替换 print
+                    _print_status(f"[Sync] DB路径更新: {len(to_update_path)} 条\n")
+                    conn.executemany(
+                        "UPDATE images SET filename = ? WHERE md5 = ?",
+                        [(new_path, mid) for mid, new_path in to_update_path]
+                    )
                         
                 if to_add:
-                    print(f"[Sync] 新增记录: {len(to_add)}")
+                    # 替换 print
+                    _print_status(f"[Sync] 新文件入库: {len(to_add)} 张\n")
+                    conn.executemany(
+                        "INSERT OR IGNORE INTO images (md5, filename) VALUES (?, ?)",
+                        [(mid, disk_md5_map[mid]) for mid in to_add]
+                    )
+                    # 同步 trash 标签状态
                     for mid in to_add:
-                        rel = disk_md5_map[mid]
-                        conn.execute("INSERT OR IGNORE INTO images (md5, filename) VALUES (?, ?)", (mid, rel))
-                        self._ensure_thumbnail_exists(rel)
-                        # 初始化 trash 标签
-                        if self._is_trash_path(rel):
-                            self._add_tag_to_image(conn, mid, TRASH_TAG)
+                        self._sync_trash_tag_in_db(conn, mid, self._is_trash_path(disk_md5_map[mid]))
 
                 conn.commit()
-                print("[Sync] 同步完成")
+                # 替换 print
+                _print_status("[Sync] 同步完成\n")
 
             except Exception as e:
-                print(f"[Sync Error] {e}")
-                traceback.print_exc()
+                # 替换 print 为 _print_status(..., is_error=True)
+                _print_status(f"[Sync] 异常: {e}", is_error=True)
+                # 保持 traceback 打印 (通常会打印多行，不受 _print_status 控制)
+                traceback.print_exc() 
             finally:
                 conn.close()
+                
+                
 
     def _sync_trash_tag_in_db(self, conn, md5, should_be_trash):
         """确保 DB 中的标签与物理路径一致"""
@@ -492,7 +716,7 @@ class DataManager:
         return {"success": False, "message": "没有更多图片了"}
 
     def save_tags(self, filename, tags):
-        if not filename: return {"success": False, "message": "No filename"}
+        if not filename: return {"success": False, "message": "缺少 filename 参数"}
         normalized_filename = self._normalize_rel_path(filename)
         md5_id = os.path.basename(normalized_filename).rsplit('.', 1)[0]
         
@@ -507,7 +731,7 @@ class DataManager:
             cursor.execute("SELECT filename FROM images WHERE md5 = ?", (md5_id,))
             row = cursor.fetchone()
             if not row:
-                return {"success": False, "message": "Image not found in DB"}
+                return {"success": False, "message": "未找到该图片信息"}
             
             current_path = row['filename']
             currently_in_trash = self._is_trash_path(current_path)
@@ -552,24 +776,41 @@ class DataManager:
             
         except Exception as e:
             conn.rollback()
+            print(f"[Save Tags] 更新索引失败: {e}")
             traceback.print_exc()
             return {"success": False, "message": str(e)}
         finally:
             conn.close()
 
+
     def _relocate_image(self, src_rel, dst_rel):
         """移动物理文件和缩略图"""
+        if not src_rel or not dst_rel:
+            raise ValueError("来源或目标路径不能为空")
         src_full = self._path_join(IMAGE_FOLDER, src_rel)
         dst_full = self._path_join(IMAGE_FOLDER, dst_rel)
         
+        if not os.path.exists(src_full):
+            raise FileNotFoundError(f"源文件不存在: {src_full}")
+
         if os.path.abspath(src_full) == os.path.abspath(dst_full):
             return src_rel
             
         os.makedirs(os.path.dirname(dst_full), exist_ok=True)
         if os.path.exists(dst_full):
-            os.remove(dst_full) # 覆盖
+            try:
+                os.remove(dst_full) # 覆盖
+            except Exception as e:
+                # 替换 print
+                _print_status(f"[Relocate Image] 删除目标文件失败: {e}", is_error=True)
+                raise
             
-        shutil.move(src_full, dst_full)
+        try:
+            shutil.move(src_full, dst_full)
+        except Exception as e:
+            # 替换 print
+            _print_status(f"[Save Tags] 移动文件失败: {e}", is_error=True)
+            raise
         
         # 移动缩略图
         src_thumb = self._path_join(THUMBNAIL_FOLDER, self._thumbnail_rel_path(src_rel))
@@ -577,52 +818,84 @@ class DataManager:
         if os.path.exists(src_thumb):
             os.makedirs(os.path.dirname(dst_thumb), exist_ok=True)
             if os.path.exists(dst_thumb): os.remove(dst_thumb)
-            shutil.move(src_thumb, dst_thumb)
+            try:
+                shutil.move(src_thumb, dst_thumb)
+            except Exception as e:
+                # 替换 print
+                _print_status(f"[Thumb Move] 无法移动缩略图: {e}", is_error=True)
+                raise
             
         return dst_rel
 
+
+
     def get_common_tags(self, limit=100, offset=0, query=""):
         conn = self.db.get_conn()
+        conn.row_factory = sqlite3.Row  # 确保可以通过列名访问
         cursor = conn.cursor()
         
-        # 统计每个 tag 的引用次数
-        # 注意：这里统计的是 tag.id，后面需要聚合 synonym
+        # [优化点]
+        # 不再通过 JOIN image_tags 实时计算 (那个太慢了)。
+        # 而是直接读取 tags 表里的 ref_count 字段 (这个极快)。
+        # 注意：这里不能在 SQL 里分页，必须全量拉取，否则同义词合并会数据不全。
         
-        sql = """
-            SELECT t.name, COUNT(it.image_md5) as cnt 
-            FROM tags t 
-            JOIN image_tags it ON t.id = it.tag_id 
-            GROUP BY t.id 
-        """
+        sql = "SELECT name, ref_count FROM tags WHERE ref_count > 0"
         cursor.execute(sql)
-        raw_stats = cursor.fetchall() # [(name, count), ...]
+        raw_rows = cursor.fetchall() # 结果示例: [{'name': '猫', 'ref_count': 100}, ...]
         conn.close()
         
-        # Python 层面聚合 (处理同义词合并)
+        # --- Python 层面聚合 (处理同义词合并) ---
         merged_stats = {}
-        for row in raw_stats:
-            raw_tag, count = row['name'], row['cnt']
+        
+        for row in raw_rows:
+            raw_tag = row['name']
+            count = row['ref_count']
+            
+            # 找到根标签 (如果自己就是根，返回自己)
             root = self.synonym_leaf_to_root.get(raw_tag, raw_tag)
             
             if root not in merged_stats:
-                merged_stats[root] = {"tag": root, "count": 0, "synonyms": self.synonym_map.get(root, [])}
+                merged_stats[root] = {
+                    "tag": root, 
+                    "count": 0, 
+                    "synonyms": self.synonym_map.get(root, [])
+                }
+            # 累加计数 (比如把 '猫咪' 的 5 次加到 '猫' 的 100 次上)
             merged_stats[root]["count"] += count
             
-        # 过滤与排序
+        # --- 过滤 (搜索) ---
         result_list = []
         q_lower = query.lower().strip()
         
         for root, data in merged_stats.items():
+            # 如果有搜索词，检查 根标签 或 任意同义词 是否匹配
             if q_lower:
                 match_main = q_lower in root.lower()
                 match_syn = any(q_lower in s.lower() for s in data['synonyms'])
-                if not (match_main or match_syn): continue
+                if not (match_main or match_syn): 
+                    continue
             result_list.append(data)
             
+        # --- 排序 ---
+        # 按总引用次数倒序
         result_list.sort(key=lambda x: x['count'], reverse=True)
+        
+        # --- 分页 (Slice) ---
         total = len(result_list)
-        return {"tags": result_list[offset:offset+limit], "total": total}
 
+        # 1. 如果 limit 是 -1，直接返回全量列表，【千万不要走下面的切片逻辑】
+        if limit == -1:
+            return {
+                "tags": result_list, 
+                "total": total
+            }
+            
+        # 2. 常规分页逻辑 (只有 limit > 0 时才走这里)
+        return {
+            "tags": result_list[offset : offset + limit], 
+            "total": total
+        }
+    
 
 
     def _build_search_query(self, include_tags, exclude_tags, min_tags=None, max_tags=None):
@@ -833,9 +1106,12 @@ class DataManager:
         else:
             # filter_type == 'all' or 'tagged'
             # 如果是 tagged，我们加上 min_tags=1 的隐含条件 (如果用户没指定 min)
-            if filter_type == 'tagged' and min_tags is None:
-                min_tags = 1
-                
+            if filter_type == 'tagged':
+                try:
+                    parsed_min = int(min_tags) if min_tags is not None else 0
+                except (TypeError, ValueError):
+                    parsed_min = 0
+                min_tags = parsed_min if parsed_min >= 1 else 1
             sql, params = self._build_search_query(include, exclude, min_tags, max_tags)
             
         # 分页执行
@@ -862,7 +1138,7 @@ class DataManager:
     # --- 导入/导出/检查 ---
 
     def check_md5_exists(self, md5_val: str):
-        if not md5_val: return {"exists": False, "message": "No MD5"}
+        if not md5_val: return {"exists": False, "message": "缺少 md5 参数"}
         conn = self.db.get_conn()
         cursor = conn.cursor()
         cursor.execute("SELECT filename FROM images WHERE md5 = ?", (md5_val,))
@@ -876,27 +1152,56 @@ class DataManager:
             conn.close()
             payload = self._build_image_payload(row['filename'], tags, md5_val)
             payload["exists"] = True
-            payload["message"] = "Exists"
+            payload["message"] = "图片已存在"
             return payload
-        return {"exists": False, "md5": md5_val}
+        return {"exists": False, "md5": md5_val, "message": "未找到重复图片"}
+
+
 
     def check_upload(self, file_obj, provided_md5=None):
         md5_calc = calculate_md5(file_stream=file_obj)
         file_obj.seek(0)
         
         if provided_md5 and provided_md5.lower() != md5_calc:
-            return {"exists": False, "error": True, "message": "MD5 mismatch"}
+            return {"exists": False, "error": True, "message": "MD5 校验失败，文件与声明值不一致"}
             
         check = self.check_md5_exists(md5_calc)
         if check.get("exists"):
+            check["message"] = "图片已存在（未重复上传）"
             return check
             
-        # 保存文件
-        ext = os.path.splitext(file_obj.filename)[1].lower()
-        if ext not in {'.'+e for e in ALLOWED_EXTS}: ext = '.jpg'
-        new_fname = f"{md5_calc}{ext}"
+        # ================= 改动开始 =================
+        # 1. 尝试通过 PIL 识别真实的图片格式，而不是依赖 filename
+        try:
+            with Image.open(file_obj) as img:
+                real_format = img.format.lower() # 例如 'jpeg', 'png', 'gif', 'webp'
+                
+                # 格式名称标准化
+                if real_format == 'jpeg':
+                    ext = 'jpg'
+                else:
+                    ext = real_format
+        except Exception:
+            # 如果 PIL 无法识别（不是图片），则回退到文件名或报错
+            ext = os.path.splitext(file_obj.filename)[1].lower().lstrip('.')
+
+        # 重置文件指针，因为 Image.open 可能会读取文件头
+        file_obj.seek(0)
+        
+        # 2. 校验格式是否在白名单中
+        if not ext or ext not in ALLOWED_EXTS:
+            ext_list = ', '.join(sorted(ALLOWED_EXTS))
+            return {"exists": False, "error": True, "message": f"不支持的文件类型或无法识别，仅支持: {ext_list}"}
+        # ================= 改动结束 =================
+
+        new_fname = f"{md5_calc}.{ext}"
         save_path = os.path.join(IMAGE_FOLDER, new_fname)
-        file_obj.save(save_path)
+        
+        try:
+            file_obj.save(save_path)
+        except Exception as e:
+             return {"exists": False, "error": True, "message": f"保存文件失败: {str(e)}"}
+
         self._ensure_thumbnail_exists(new_fname)
         
         # 写入 DB
@@ -907,19 +1212,31 @@ class DataManager:
         finally:
             conn.close()
             
-        return self._build_image_payload(new_fname, [], md5_calc)
+        payload = self._build_image_payload(new_fname, [], md5_calc)
+        payload["message"] = "上传成功"
+        return payload
 
     def import_json(self, data):
         if self.task_lock.locked():
-             yield json.dumps({"status": "waiting", "message": "Waiting for lock..."}) + "\n"
+             yield json.dumps({"status": "waiting", "message": "正在等待后台扫描完成..."}) + "\n"
              
         with self.task_lock:
             try:
                 # 1. Synonyms
                 if "tag_synonyms" in data:
                     self._save_synonyms(data["tag_synonyms"])
+
+
+                # 【新增】2. Common Tags (预设标签库)
+                if "common_tags" in data:
+                    conn = self.db.get_conn()
+                    # 批量插入所有标签
+                    conn.executemany("INSERT OR IGNORE INTO tags (name) VALUES (?)", 
+                                     [(t,) for t in data["common_tags"]])
+                    conn.commit()
+                    conn.close()    
                     
-                # 2. Images
+                # 3. Images
                 if "images" in data:
                     conn = self.db.get_conn()
                     cursor = conn.cursor()
@@ -957,11 +1274,12 @@ class DataManager:
                             
                     cursor.execute("COMMIT")
                     conn.close()
-                    yield json.dumps({"status": "success", "message": f"Imported {count} items"}) + "\n"
+                    yield json.dumps({"status": "success", "message": f"导入成功！已恢复 {count} 条记录。"}) + "\n"
                     
             except Exception as e:
                 traceback.print_exc()
-                yield json.dumps({"status": "error", "message": str(e)}) + "\n"
+                yield json.dumps({"status": "error", "message": f"导入失败: {str(e)}"}) + "\n"
+
 
     def export_json(self):
         conn = self.db.get_conn()
@@ -969,26 +1287,39 @@ class DataManager:
         
         export_data = {
             "tag_synonyms": self.synonym_map,
-            "images": {}
+            "images": {},
+            "common_tags": [] 
         }
         
-        # 获取所有图片和标签 (Group Concat 优化查询次数)
-        cursor.execute("""
-            SELECT i.filename, i.md5, GROUP_CONCAT(t.name) as tags_str
-            FROM images i
-            LEFT JOIN image_tags it ON i.md5 = it.image_md5
-            LEFT JOIN tags t ON it.tag_id = t.id
-            GROUP BY i.md5
-        """)
-        
-        for row in cursor.fetchall():
-            tags = row['tags_str'].split(',') if row['tags_str'] else []
-            export_data["images"][row['filename']] = {
-                "md5": row['md5'],
-                "tags": tags
-            }
+        try:
+            # 1. 导出标签库 (Common Tags)
+            cursor.execute("SELECT name FROM tags")
+            export_data["common_tags"] = [row['name'] for row in cursor.fetchall()]
             
-        conn.close()
+            # 2. 导出图片及关联
+            cursor.execute("""
+                SELECT i.filename, i.md5, GROUP_CONCAT(t.name) as tags_str
+                FROM images i
+                LEFT JOIN image_tags it ON i.md5 = it.image_md5
+                LEFT JOIN tags t ON it.tag_id = t.id
+                GROUP BY i.md5
+            """)
+            
+            for row in cursor.fetchall():
+                tags = row['tags_str'].split(',') if row['tags_str'] else []
+                export_data["images"][row['filename']] = {
+                    "md5": row['md5'],
+                    "tags": tags
+                }
+        finally:
+            conn.close()
+
+        # 3. [保留控制台输出] 检测触发扫描
+        # 这里只做动作，不给前端发信号，保持接口简单
+        if not self.scan_thread_started:
+            _print_status("[Trigger] 检测到导出操作，结束【待机模式】，立即启动后台扫描...\n")
+            self.start_scan_thread()
+            
         return json.dumps(export_data, ensure_ascii=False, indent=2)
 
     def update_tag_group(self, main_tag, synonyms):
@@ -1081,9 +1412,10 @@ def up_syn(): return jsonify({"success": dm.update_tag_group(request.json.get('m
 
 @app.route('/api/manual_scan')
 def manual_scan():
-    if request.args.get('key') != 'bqbq_secure_scan_key_2025_v1': return "Invalid Key", 403
+    if request.args.get('key') != 'bqbq_secure_scan_key_2025_v1': return "密钥验证失败 (Invalid Key)", 403
+    _print_status("[API] 收到手动扫描请求，开始执行...\n")
     threading.Thread(target=dm._sync_files_to_db).start()
-    return "Scan started in background"
+    return "扫描与同步任务已执行完毕 (Sync Completed)."
 
 @app.route('/api/get_image_info')
 def get_info():
@@ -1093,7 +1425,7 @@ def get_info():
     cursor = conn.cursor()
     if md5: cursor.execute("SELECT * FROM images WHERE md5=?", (md5,))
     elif fname: cursor.execute("SELECT * FROM images WHERE filename=?", (fname,))
-    else: return jsonify({"success": False}), 400
+    else: return jsonify({"success": False, "message": "请提供 filename 或 md5 参数"}), 400
     
     row = cursor.fetchone()
     if row:
@@ -1101,7 +1433,7 @@ def get_info():
         conn.close()
         return jsonify({"success": True, **dm._build_image_payload(row['filename'], tags, row['md5'])})
     conn.close()
-    return jsonify({"success": False}), 404
+    return jsonify({"success": False, "message": "未找到该图片信息"}), 404
 
 @app.route('/api/get_by_offset')
 def get_offset():
@@ -1121,7 +1453,7 @@ def get_offset():
     
     if not row:
         conn.close()
-        return "Not found", 404
+        return jsonify({"success": False, "message": "偏移量超出范围或库为空"}), 404
         
     tags = dm._get_tags_for_image(conn, row['md5'])
     conn.close()
@@ -1130,5 +1462,38 @@ def get_offset():
     if mode == 'image': return redirect(payload['url'])
     return jsonify({"success": True, "total": total, "offset": offset, **payload})
 
+
 if __name__ == '__main__':
-    app.run(port=5000, debug=True)
+    load_dotenv()
+    host = os.getenv('HOST', '127.0.0.1')
+    try:
+        port = int(os.getenv('PORT', 5000))
+    except ValueError:
+        port = 5000
+
+    import argparse
+    parser = argparse.ArgumentParser(description='BQBQ 表情包服务器')
+    # 参数存在则为 True，不存在则为 False
+    parser.add_argument('--init-import', action='store_true', help='启动进入等待模式，暂不扫描硬盘，允许先从前端导入数据')
+    args = parser.parse_args()
+
+    _print_status(f"[*] Starting server on {host}:{port}\n")
+
+    # [逻辑梳理]
+    if args.init_import:
+        # Case 1: 用户加了 --init-import 参数
+        # 行为：保持静默，打印提示，不调用 start_scan_thread()
+        _print_status("\n" + "="*60 + "\n")
+        _print_status("[System] ⚠ 已启用【初始化导入模式】(init-import)\n")
+        _print_status("[System] 后台扫描线程已暂停。\n")
+        _print_status("[System] 请在网页端【数据管理】->【导入数据】恢复 JSON。\n")
+        _print_status("[System] 导入完成后，点击【导出数据】按钮，系统将自动激活后台扫描。\n")
+        _print_status("="*60 + "\n\n")
+    else:
+        # Case 2: 用户没加参数 (默认情况)
+        # 行为：立即启动扫描
+        _print_status("[System] 默认模式启动，激活后台扫描与缩略图生成...\n")
+        dm.start_scan_thread()
+
+    CORS(app) 
+    app.run(host=host, port=port, debug=True)

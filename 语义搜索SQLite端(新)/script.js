@@ -335,6 +335,10 @@ class SynonymModalManager {
  * 主应用逻辑
  */
 class MemeApp {
+
+    
+
+
     constructor() {
         this.state = {
             view: 'search',
@@ -343,20 +347,64 @@ class MemeApp {
             tagging: { file: null, tags: new Set(), tagsOffset: 0, filter: 'untagged' },
             upload: { file: null, tags: new Set(), tagsOffset: 0, md5: null, pending: false, localUrl: null },
         };
-        this.commonTagsCacheKey = 'common_tags_cache_v1';
-        this.commonTagsCacheTTL = 5 * 60 * 1000; // 5 minutes
-        this.commonTagsCache = this.restoreCommonTagsCache();
-        this.cachedCommonTagsList = this.buildCachedCommonTagsList();
+        
+        // [新] 本地全量标签缓存
+        this.allTagsData = []; 
+        this.isTagsLoaded = false;
+        
         this.taggingHistory = [];
         this.modalManager = new SynonymModalManager(this);
         this.viewer = null;
         this.confirmModal = null;
-        this.confirmMessageEl = null;
-        this.confirmOkBtn = null;
-        this.confirmCancelBtn = null;
-        this.pendingConfirmResolver = null;
+        // ... (Confirm Modal 相关的变量保持不变) ...
+        
         this.init();
     }
+
+    async init() {
+        this.bindNav();
+        this.bindSearch();
+        this.bindBrowse();
+        this.bindTagging();
+        this.bindUpload();
+        this.bindIO();
+        this.bindConfirmModal();
+        this.bindSidebarEvents();
+        this.setupImageViewer();
+
+        // [新] 启动时拉取一次全量标签
+        await this.fetchAllTagsToMemory();
+
+        this.switchView('search');
+    }
+
+    // [新] 核心方法：拉取全量数据到内存
+    async fetchAllTagsToMemory() {
+        // limit=-1 约定为获取全量数据
+        const res = await this.api('/api/get_common_tags?limit=-1');
+        if (res && res.tags) {
+            this.allTagsData = res.tags; 
+            this.isTagsLoaded = true;
+            // console.log(`[Frontend] 已缓存 ${this.allTagsData.length} 个标签到本地内存`);
+        }
+    }
+
+    // [新] 核心辅助：内存搜索 (用于自动补全)
+    searchMemoryTags(query, limit = 8) {
+        if (!this.isTagsLoaded) return [];
+        const q = (query || '').toLowerCase().trim();
+        if (!q) return this.allTagsData.slice(0, limit);
+        
+        return this.allTagsData.filter(item => {
+             const nameHit = item.tag.toLowerCase().includes(q);
+             const synHit = item.synonyms && item.synonyms.some(s => s.toLowerCase().includes(q));
+             return nameHit || synHit;
+        }).slice(0, limit);
+    }
+
+    // [重写] UI渲染：完全基于内存切片，不发请求
+
+    
 
     
     async api(url, opts = {}) {
@@ -729,20 +777,7 @@ class MemeApp {
         });
     }
 
-    init() {
-        this.bindNav();
-        this.bindSearch();
-        this.bindBrowse();
-        this.bindTagging();
-        this.bindUpload();
-        this.bindIO();
-        this.bindConfirmModal();
-        
-        this.bindSidebarEvents();
-        this.setupImageViewer();
 
-        this.switchView('search');
-    }
 
 
     bindSidebarEvents() {
@@ -1030,94 +1065,108 @@ class MemeApp {
     }
 
     // --- Common Tags (标签库加载 - 优化布局版) ---
-    async loadCommonTags(containerId, context, append = false, query = "") {
+    
+    loadCommonTags(containerId, context, append = false, query = "") {
         const container = document.getElementById(containerId);
         if (!container) return;
-        if (!append) { container.innerHTML = ''; this.state[context].tagsOffset = 0; }
         
-        const limit = 60;
-        const offset = this.state[context].tagsOffset;
-        const res = await this.fetchCommonTags(limit, offset, query);
-        
-        if (res && res.tags) {
-            const fragment = document.createDocumentFragment();
-            res.tags.forEach(data => {
-                const t = data.tag;
-                const synonyms = data.synonyms || [];
-                const isSelected = context === 'browse' && this.state.browse.tags.has(t);
-                
-                // 修改说明：将 pr-7 改为 pr-5 (预留空间从 28px 减小到 20px)
-                // 使用 relative 布局，并预留右侧空间 (pr-5) 放置 hover 图标，避免宽度抖动
-                const btn = document.createElement('div');
-                btn.className = `relative group inline-flex items-center rounded-lg border transition-all cursor-pointer select-none overflow-hidden font-medium text-xs pr-1 h-[30px]
-                    ${isSelected ? 'bg-blue-600 text-white border-blue-600 shadow-md ring-2 ring-blue-100' : 'bg-white text-gray-600 border-gray-200 hover:border-blue-400 hover:text-blue-600 hover:shadow-sm'}
-                `;
-                
-                // 1. Main Tag Text (Truncate)
-                const span = document.createElement('span');
-                span.className = "px-3 common-tag-text truncate max-w-[140px] leading-none";
-                span.innerText = t;
-                span.onclick = () => {
-                    if (context === 'browse') {
-                        if (this.state.browse.tags.has(t)) this.state.browse.tags.delete(t);
-                        else this.state.browse.tags.add(t);
-                        this.refreshBrowseFilters();
-                        this.loadBrowse(false);
-                    } else {
-                        this.addTagToState(context, t);
-                    }
-                };
-                btn.appendChild(span);
-                
-                // 2. Action Icon (Absolute Positioned, Opacity Transition)
-                const actionContainer = document.createElement('div');
-                actionContainer.className = "absolute -right-1.5 top-1/2 -translate-y-1/2 mt-1.5 flex items-center justify-center";
-                
-                if (synonyms.length > 0) {
-                    // 同义词指示点 (默认显示小点，hover 变大点/提示)
-                    const dot = document.createElement('span');
-                    dot.className = "w-1.5 h-1.5 rounded-full bg-orange-400 group-hover:scale-125 transition-transform";
-                    dot.title = `包含同义词: ${synonyms.join(', ')}`;
-                    // 让整个右侧区域可点
-                    const clickArea = document.createElement('div');
-                    clickArea.className = "w-5 h-5 flex items-center justify-center cursor-pointer hover:bg-gray-100 rounded-full transition";
-                    clickArea.onclick = (e) => { e.stopPropagation(); this.modalManager.open(t, synonyms); };
-                    clickArea.appendChild(dot);
-                    actionContainer.appendChild(clickArea);
-                } else {
-                    // 编辑图标 (默认隐藏 opacity-0, hover 显示)
-                    const editIcon = document.createElement('span');
-                    editIcon.className = "text-gray-400 hover:text-blue-600 opacity-0 group-hover:opacity-100 transition-opacity text-[10px] cursor-pointer p-1";
-                    editIcon.innerHTML = "✎";
-                    editIcon.onclick = (e) => { e.stopPropagation(); this.modalManager.open(t, synonyms); };
-                    actionContainer.appendChild(editIcon);
-                }
-                btn.appendChild(actionContainer);
+        // 【关键】数据未就绪则跳过，防止报错
+        if (!this.isTagsLoaded) return;
 
-                // 3. Delete Button (Absolute Top Right Badge)
-                // 保持原样，它已经是 absolute 且不影响布局
-                const smallDel = document.createElement('span');
-                smallDel.className = "absolute -top-1.5 -right-1.5 w-4 h-4 bg-red-500 text-white rounded-full text-[10px] flex items-center justify-center opacity-0 group-hover:opacity-100 transition cursor-pointer hover:scale-110 z-30 shadow-sm border border-white";
-                smallDel.innerHTML = "&times;";
-                smallDel.onclick = async (e) => {
-                     e.stopPropagation();
-                     if(await this.customConfirm(`确认从标签库中删除 "${t}"？`)) {
-                        await this.api('/api/delete_common_tag', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({tag:t})});
-                        this.clearCommonTagsCache();
-                        this.loadCommonTags(containerId, context);
-                     }
-                };
-                
-                btn.appendChild(smallDel);
-                fragment.appendChild(btn);
-            });
-            container.appendChild(fragment);
-            
-            this.state[context].tagsOffset += res.tags.length;
-            const moreBtn = document.getElementById(`${context === 'browse' ? 'browse-tags' : context === 'tagging' ? 'common-tags' : 'upload-tags'}-load-more`);
-            if(moreBtn) moreBtn.classList.toggle('hidden', res.tags.length < limit);
+        if (!append) { 
+            container.innerHTML = ''; 
+            this.state[context].tagsOffset = 0; 
         }
-    }
+        
+        const limit = 60; // 每次渲染数量
+        const offset = this.state[context].tagsOffset;
+        
+        // 1. 内存过滤 (本地搜索)
+        let dataSource = this.allTagsData;
+        if (query.trim()) {
+            const q = query.toLowerCase().trim();
+            dataSource = this.allTagsData.filter(item => {
+                const nameHit = item.tag.toLowerCase().includes(q);
+                const synHit = item.synonyms && item.synonyms.some(s => s.toLowerCase().includes(q));
+                return nameHit || synHit;
+            });
+        }
+        
+        // 2. 内存分页
+        const slicedTags = dataSource.slice(offset, offset + limit);
+        
+        // 3. 构建 DOM (保持 UI 逻辑)
+        const fragment = document.createDocumentFragment();
+        slicedTags.forEach(data => {
+            const t = data.tag;
+            const synonyms = data.synonyms || [];
+            const isSelected = context === 'browse' && this.state.browse.tags.has(t);
+            
+            const btn = document.createElement('div');
+            btn.className = `relative group inline-flex items-center rounded-lg border transition-all cursor-pointer select-none overflow-hidden font-medium text-xs pr-1 h-[30px]
+                ${isSelected ? 'bg-blue-600 text-white border-blue-600 shadow-md ring-2 ring-blue-100' : 'bg-white text-gray-600 border-gray-200 hover:border-blue-400 hover:text-blue-600 hover:shadow-sm'}
+            `;
+            
+            // Tag Text
+            const span = document.createElement('span');
+            span.className = "px-3 common-tag-text truncate max-w-[140px] leading-none";
+            span.innerText = t;
+            span.onclick = () => {
+                if (context === 'browse') {
+                    if (this.state.browse.tags.has(t)) this.state.browse.tags.delete(t);
+                    else this.state.browse.tags.add(t);
+                    this.refreshBrowseFilters();
+                    this.loadBrowse(false);
+                } else {
+                    this.addTagToState(context, t);
+                }
+            };
+            btn.appendChild(span);
+            
+            // Action Icon (同义词/编辑)
+            const actionContainer = document.createElement('div');
+            actionContainer.className = "absolute -right-1.5 top-1/2 -translate-y-1/2 mt-1.5 flex items-center justify-center";
+            if (synonyms.length > 0) {
+                const dot = document.createElement('span');
+                dot.className = "w-1.5 h-1.5 rounded-full bg-orange-400 group-hover:scale-125 transition-transform";
+                dot.title = `包含同义词: ${synonyms.join(', ')}`;
+                const clickArea = document.createElement('div');
+                clickArea.className = "w-5 h-5 flex items-center justify-center cursor-pointer hover:bg-gray-100 rounded-full transition";
+                clickArea.onclick = (e) => { e.stopPropagation(); this.modalManager.open(t, synonyms); };
+                clickArea.appendChild(dot);
+                actionContainer.appendChild(clickArea);
+            } else {
+                const editIcon = document.createElement('span');
+                editIcon.className = "text-gray-400 hover:text-blue-600 opacity-0 group-hover:opacity-100 transition-opacity text-[10px] cursor-pointer p-1";
+                editIcon.innerHTML = "✎";
+                editIcon.onclick = (e) => { e.stopPropagation(); this.modalManager.open(t, synonyms); };
+                actionContainer.appendChild(editIcon);
+            }
+            btn.appendChild(actionContainer);
+
+            // Delete Button
+            const smallDel = document.createElement('span');
+            smallDel.className = "absolute -top-1.5 -right-1.5 w-4 h-4 bg-red-500 text-white rounded-full text-[10px] flex items-center justify-center opacity-0 group-hover:opacity-100 transition cursor-pointer hover:scale-110 z-30 shadow-sm border border-white";
+            smallDel.innerHTML = "&times;";
+            smallDel.onclick = async (e) => {
+                 e.stopPropagation();
+                 if(await this.customConfirm(`确认从标签库中删除 "${t}"？`)) {
+                    await this.api('/api/delete_common_tag', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({tag:t})});
+                    // 删除后刷新全量数据
+                    await this.fetchAllTagsToMemory();
+                    this.loadCommonTags(containerId, context);
+                 }
+            };
+            
+            btn.appendChild(smallDel);
+            fragment.appendChild(btn);
+        });
+        container.appendChild(fragment);
+        
+        this.state[context].tagsOffset += slicedTags.length;
+        const moreBtn = document.getElementById(`${context === 'browse' ? 'browse-tags' : context === 'tagging' ? 'common-tags' : 'upload-tags'}-load-more`);
+        if(moreBtn) moreBtn.classList.toggle('hidden', this.state[context].tagsOffset >= dataSource.length);
+    }    
 
     addTagToState(ctx, tag) {
         this.state[ctx].tags.add(tag);
@@ -1156,7 +1205,7 @@ class MemeApp {
 
     // --- Search Logic ---
     bindSearch() {
-            const fetcher = async (q) => this.searchCachedCommonTags(q, 8);
+            const fetcher = async (q) => this.searchMemoryTags(q);
             // Autocomplete binding
             const incInput = document.getElementById('search-include');
             const excInput = document.getElementById('search-exclude');
@@ -1329,13 +1378,18 @@ class MemeApp {
             document.getElementById('browse-new-tag-input').value = tag;
         }, fetcher);
 
+
+        
+
         document.getElementById('browse-add-tag-btn').onclick = async () => {
             const inp = document.getElementById('browse-new-tag-input');
             const val = inp.value.trim();
             if(!val) return;
             await this.api('/api/add_common_tag', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({tag:val})});
-            this.clearCommonTagsCache();
+            
             inp.value='';
+            // 刷新内存
+            await this.fetchAllTagsToMemory();
             this.loadCommonTags('browse-tags-container', 'browse');
         };
     }
@@ -1386,86 +1440,104 @@ class MemeApp {
         }
     }
 
-    // --- Tagging Logic ---
+    
+// [重写] 打标页面逻辑：包含智能刷新侧边栏
     bindTagging() {
-        const fetcher = async (q) => this.searchCachedCommonTags(q, 8);
+        // 使用内存 fetcher
+        const fetcher = async (q) => this.searchMemoryTags(q);
         
-        // 1. 打标输入框
         new TagAutocomplete(document.getElementById('tag-input'), (t) => this.addTagToState('tagging', t), fetcher);
-        
-        // 2. 库添加输入框
-        new TagAutocomplete(document.getElementById('new-common-tag-input'), (t) => {
-            document.getElementById('new-common-tag-input').value = t; 
-        }, fetcher);
+        new TagAutocomplete(document.getElementById('new-common-tag-input'), (t) => { document.getElementById('new-common-tag-input').value = t; }, fetcher);
 
         document.getElementById('add-tag-btn').onclick = () => {
             const inp = document.getElementById('tag-input');
             if(inp.value.trim()) { this.addTagToState('tagging', inp.value.trim()); inp.value=''; }
         };
 
-        // --- 新增：绑定打标页面的筛选按钮 ---
+        // 筛选按钮逻辑
         document.querySelectorAll('.tagging-filter-chip').forEach(btn => {
             btn.onclick = () => {
-                // 1. UI 切换
                 document.querySelectorAll('.tagging-filter-chip').forEach(b => b.classList.remove('active'));
                 btn.classList.add('active');
-                
-                // 2. 更新状态
                 this.state.tagging.filter = btn.dataset.filter;
-                
-                // 3. 重新加载图片（清空历史记录，因为过滤条件变了）
                 this.taggingHistory = []; 
                 this.loadTaggingImage();
             };
         });
 
-        // 保存逻辑
+        // 保存并智能刷新
         const save = async () => {
             const s = this.state.tagging;
             if (!s.file) return;
             if (!s.tags.size) return this.toast('请至少添加一个标签', 'error');
             
+            // --- 智能检测生词 ---
+            let hasNewTag = false;
+            if (this.isTagsLoaded) {
+                // 构建快速 Set (仅为了 diff，性能通常不是问题)
+                const knownTags = new Set(this.allTagsData.map(i => i.tag).concat(...this.allTagsData.map(i => i.synonyms || [])));
+                for (const t of s.tags) {
+                    if (!knownTags.has(t)) { hasNewTag = true; break; }
+                }
+            } else {
+                hasNewTag = true; // 还没加载过，保险起见刷新
+            }
+            // ------------------
+
             const btn = document.getElementById('save-next-button');
             const originalText = btn.textContent;
             btn.textContent = "保存中...";
-            await this.api('/api/save_tags', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({filename:s.file, tags:Array.from(s.tags)})});
+            
+            const res = await this.api('/api/save_tags', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({filename:s.file, tags:Array.from(s.tags)})});
             btn.textContent = originalText;
             
-            this.toast('保存成功');
-            // 保存并下一张时，将当前状态（已含标签）推入历史，方便回看
-            this.pushHistory(); 
-            this.loadTaggingImage();
+            if (res && res.success) {
+                this.toast('保存成功');
+                this.pushHistory(); 
+                
+                if (hasNewTag) {
+                    // 如果有新词，后台更新内存，然后刷新侧边栏
+                    await this.fetchAllTagsToMemory();
+                    this.loadCommonTags('common-tags-container', 'tagging');
+                }
+                // 下一张
+                this.loadTaggingImage();
+            } else {
+                this.toast(res ? res.message : '保存失败', 'error');
+            }
         };
         
         document.getElementById('save-next-button').onclick = save;
 
-        // --- 新增：上一张/下一张 逻辑 ---
-        
+        // 翻页控制
         document.getElementById('prev-button').onclick = () => {
-            if (this.taggingHistory.length === 0) {
-                return this.toast('没有上一张记录了', 'error');
-            }
-            const prevItem = this.taggingHistory.pop(); // 取出上一张
+            if (this.taggingHistory.length === 0) return this.toast('没有上一张记录了', 'error');
+            const prevItem = this.taggingHistory.pop(); 
             this.renderTaggingView(prevItem.file, prevItem.url, prevItem.tags, prevItem.md5);
         };
-
         document.getElementById('next-button').onclick = () => {
-            this.pushHistory(); // 记录当前这张
-            this.loadTaggingImage(); // 加载新图
+            this.pushHistory(); 
+            this.loadTaggingImage(); 
         };
         
-        // 库管理相关
+        // 库管理：添加新标签
         document.getElementById('add-common-tag-button').onclick = async () => {
             const inp = document.getElementById('new-common-tag-input');
             const val = inp.value.trim();
             if(!val) return;
             await this.api('/api/add_common_tag', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({tag:val})});
-            this.clearCommonTagsCache();
+            
             inp.value='';
+            // 必须刷新内存
+            await this.fetchAllTagsToMemory();
             this.loadCommonTags('common-tags-container', 'tagging');
         };
+        
         document.getElementById('common-tags-load-more').onclick = () => this.loadCommonTags('common-tags-container', 'tagging', true);
     }
+
+
+
 
     // 辅助方法：记录当前状态到历史
     pushHistory() {
@@ -1555,7 +1627,7 @@ class MemeApp {
 
     // --- Upload Logic (Updated with Layout & Autocomplete) ---
     bindUpload() {
-        const fetcher = async (q) => this.searchCachedCommonTags(q, 8);
+        const fetcher = async (q) => this.searchMemoryTags(q);
         
         // 1. 上传打标输入框
         new TagAutocomplete(document.getElementById('upload-tag-input'), (t) => this.addTagToState('upload', t), fetcher);
@@ -1684,17 +1756,23 @@ class MemeApp {
             await this.discardPendingUpload();
             this.resetUploadView();
         };
+        
 
         document.getElementById('upload-add-common-tag-button').onclick = async () => {
             const inp = document.getElementById('upload-new-common-tag-input');
             const val = inp.value.trim();
             if(!val) return;
             await this.api('/api/add_common_tag', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({tag:val})});
-            this.clearCommonTagsCache();
+            
             inp.value='';
+            // 刷新内存
+            await this.fetchAllTagsToMemory();
             this.loadCommonTags('upload-common-tags-container', 'upload');
         };
+
         document.getElementById('upload-tags-load-more').onclick = () => this.loadCommonTags('upload-common-tags-container', 'upload', true);
+        
+    
     }
 
     resetUploadView() {
@@ -1714,7 +1792,48 @@ class MemeApp {
 
     // --- IO ---
     bindIO() {
-        document.getElementById('export-button').onclick = () => window.location.href = '/api/export_json';
+        
+        // [修改] 导出按钮逻辑：纯 Toast 提示版
+        const exportBtn = document.getElementById('export-button');
+        
+        exportBtn.onclick = async () => {
+            // 防止重复点击
+            if(exportBtn.classList.contains('opacity-50')) return;
+            
+            // 1. 仅改变样式 (变灰)，不修改页面文字
+            exportBtn.classList.add('opacity-50', 'cursor-not-allowed');
+            
+            // 2. 立即弹出“正在处理”的 Toast
+            this.toast("⏳ 正在打包数据，请稍候...", "info");
+
+            try {
+                const res = await fetch('/api/export_json');
+                if (!res.ok) throw new Error("Export failed");
+                
+                // 3. 处理文件下载
+                const blob = await res.blob();
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'meme_db_sqlite_backup.json';
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                window.URL.revokeObjectURL(url);
+                
+                // 4. 成功后弹出成功 Toast (会顶替掉刚才的等待提示)
+                this.toast("✅ 导出成功", "success");
+                
+            } catch (e) {
+                console.error(e);
+                this.toast("❌ 导出失败: " + e.message, "error");
+            } finally {
+                // 5. 恢复按钮样式
+                exportBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+            }
+        };
+
+
         const fin = document.getElementById('import-file-input');
         const btn = document.getElementById('import-confirm-btn');
         const statusEl = document.getElementById('import-status'); // 获取状态显示元素
