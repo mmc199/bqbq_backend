@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BQBQ 表情仓库</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body class="bg-gray-50 h-screen flex flex-col overflow-hidden">
+
+    <header class="h-14 bg-white border-b flex items-center justify-between px-4 z-10 shrink-0 gap-4">
+        <h1 class="font-bold text-xl text-blue-600 hidden md:block">📂 BQBQ</h1>
+        
+        <div class="flex-1 flex flex-col items-center justify-center group relative max-w-md mx-auto">
+            <div class="flex items-center w-full gap-2">
+                <span class="text-xs text-gray-400 font-mono">-10</span>
+                <input type="range" id="page-shuttle" min="-10" max="10" value="0" step="1" 
+                    class="flex-1 h-2 bg-gray-200 rounded-lg appearance-none cursor-ew-resize accent-blue-600">
+                <span class="text-xs text-gray-400 font-mono">+10</span>
+            </div>
+            <div id="page-indicator" class="absolute top-8 bg-black/80 text-white text-xs px-2 py-0.5 rounded opacity-0 pointer-events-none transition-opacity whitespace-nowrap z-50">
+                滑动翻页
+            </div>
+        </div>
+
+        <div class="flex gap-2 items-center">
+            <label class="flex items-center gap-1 cursor-pointer select-none">
+                <span class="text-xs font-bold text-gray-500">HD</span>
+                <input type="checkbox" id="hd-toggle" class="peer sr-only">
+                <div class="w-8 h-4 bg-gray-300 rounded-full peer-checked:bg-blue-600 peer-focus:ring-2 ring-blue-300 transition relative">
+                    <div class="w-4 h-4 bg-white rounded-full shadow absolute left-0 peer-checked:left-4 transition-all"></div>
+                </div>
+            </label>
+            
+            <div class="h-6 w-px bg-gray-200 mx-1"></div>
+            
+            <select id="sort-select" class="text-xs border rounded px-1 bg-gray-50 outline-none h-7">
+                <option value="date_desc">📅 最新</option>
+                <option value="date_asc">📅 最早</option>
+                <option value="size_desc">💾 最大</option>
+                <option value="res_desc">📐 高清</option>
+            </select>
+            <button onclick="app.exportData()" class="text-xs border px-2 h-7 rounded hover:bg-gray-100">备份</button>
+        </div>
+    </header>
+
+    <main id="gallery-view" class="flex-1 overflow-y-auto p-2 md:p-4 custom-scrollbar bg-gray-100">
+        <div id="grid-container" class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3 pb-40"></div>
+    </main>
+
+    <div class="fixed bottom-6 right-6 flex flex-col items-center gap-3 group z-50">
+        <button onclick="app.clearSearch()" class="sub-fab w-10 h-10 bg-gray-500 text-white rounded-full shadow-lg flex items-center justify-center text-sm mb-1 hover:bg-gray-600" title="清除搜索">
+            ✕
+        </button>
+        <button onclick="app.doSearch()" class="sub-fab w-10 h-10 bg-blue-400 text-white rounded-full shadow-lg flex items-center justify-center text-sm hover:bg-blue-500" title="刷新搜索">
+            ↻
+        </button>
+        <button id="fab-search" class="w-14 h-14 bg-blue-600 rounded-full shadow-xl text-white text-2xl flex items-center justify-center hover:scale-110 transition">
+            🔍
+        </button>
+    </div>
+    
+
+    <button id="fab-upload" class="fixed bottom-6 left-6 w-12 h-12 bg-green-500 rounded-full shadow-xl text-white text-xl flex items-center justify-center hover:scale-110 transition z-50" onclick="document.getElementById('file-upload-input').click()">
+        ➕
+    </button>
+    <input type="file" id="file-upload-input" class="hidden" multiple accept="image/*" onchange="app.handleDirectUpload(this)">
+
+
+    <div id="search-modal" class="fixed inset-0 bg-black/50 backdrop-blur-sm hidden z-[100] flex items-start justify-center pt-[15vh]">
+        <div class="bg-white w-[90%] max-w-2xl rounded-2xl shadow-2xl overflow-hidden flex flex-col animate-[fadeIn_0.2s_ease-out]">
+            <div class="p-4 bg-gray-50 border-b text-sm text-gray-500 flex justify-between">
+                <span>空格=并集(AND) | 逗号=合集(OR) | 减号=排除(NOT)</span>
+                <button onclick="document.getElementById('search-modal').classList.add('hidden')" class="text-xl hover:text-red-500">&times;</button>
+            </div>
+            
+            <div id="capsule-container" class="p-4 cursor-text bg-white"></div>
+
+            <button onclick="app.doSearch()" class="w-full py-4 bg-blue-600 text-white font-bold hover:bg-blue-700">开始搜索</button>
+        </div>
+    </div>
+
+    <datalist id="tag-suggestions"></datalist>
+
+    <input type="hidden" id="qq-id-input" value="web_user">
+
+    <script src="script.js"></script>
+</body>
+</html>

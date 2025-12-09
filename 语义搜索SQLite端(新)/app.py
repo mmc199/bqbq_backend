@@ -1467,9 +1467,9 @@ if __name__ == '__main__':
     load_dotenv()
     host = os.getenv('HOST', '127.0.0.1')
     try:
-        port = int(os.getenv('PORT', 5000))
+        port = int(os.getenv('PORT', 5001))
     except ValueError:
-        port = 5000
+        port = 5001
 
     import argparse
     parser = argparse.ArgumentParser(description='BQBQ 表情包服务器')
