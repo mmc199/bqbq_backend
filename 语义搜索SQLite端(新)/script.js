@@ -856,6 +856,7 @@ class MemeApp {
         
         if (view === 'browse' && !document.getElementById('browse-grid').hasChildNodes()) this.loadBrowse(false);
         if (view === 'tagging' && !this.state.tagging.file) this.loadTaggingImage();
+        if (view === 'tagging') this.syncTaggingFilterButtons();
     }
 
     refreshCurrentViewTags() {
@@ -1345,6 +1346,8 @@ class MemeApp {
     // --- Browse Logic ---
     bindBrowse() {
 
+        
+
         this.bindTagCountSlider();
         // Filters
         document.querySelectorAll('.filter-chip').forEach(btn => {
@@ -1352,6 +1355,24 @@ class MemeApp {
                 document.querySelectorAll('.filter-chip').forEach(b => b.className = 'filter-chip');
                 btn.className = 'filter-chip active';
                 this.state.browse.filter = btn.dataset.filter;
+                this.loadBrowse(false);
+            };
+        });
+
+        const browseChips = document.querySelectorAll('#browse-view .filter-chip');
+
+        browseChips.forEach(btn => {
+            btn.onclick = () => {
+                const targetFilter = btn.dataset.filter;
+
+                // [新增] 核心修改：如果点击的是当前已激活的过滤器，直接忽略
+                if (this.state.browse.filter === targetFilter) return;
+
+                // UI 更新：仅重置浏览页面的 chips
+                browseChips.forEach(b => b.className = 'filter-chip');
+                btn.className = 'filter-chip active';
+                
+                this.state.browse.filter = targetFilter;
                 this.loadBrowse(false);
             };
         });
@@ -1455,15 +1476,37 @@ class MemeApp {
         };
 
         // 筛选按钮逻辑
+        const handleTaggingFilterClick = async (filter) => {
+            if (!filter) return;
+            this.state.tagging.filter = filter;
+            this.taggingHistory = [];
+            this.syncTaggingFilterButtons();
+            try {
+                await this.loadTaggingImage();
+            } catch (e) {
+                console.error('[Tagging] failed to refresh after filter change', e);
+            }
+        };
+
         document.querySelectorAll('.tagging-filter-chip').forEach(btn => {
-            btn.onclick = () => {
-                document.querySelectorAll('.tagging-filter-chip').forEach(b => b.classList.remove('active'));
-                btn.classList.add('active');
-                this.state.tagging.filter = btn.dataset.filter;
-                this.taggingHistory = []; 
-                this.loadTaggingImage();
-            };
+            const filter = btn.dataset.filter;
+            if (!filter) return;
+
+            btn.addEventListener('click', async () => {
+                btn.blur();
+                await handleTaggingFilterClick(filter);
+            });
+
+            btn.addEventListener('keyup', async (e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    btn.blur();
+                    await handleTaggingFilterClick(filter);
+                }
+            });
         });
+
+        this.syncTaggingFilterButtons();
 
         // 保存并智能刷新
         const save = async () => {
@@ -1536,6 +1579,18 @@ class MemeApp {
         document.getElementById('common-tags-load-more').onclick = () => this.loadCommonTags('common-tags-container', 'tagging', true);
     }
 
+    syncTaggingFilterButtons() {
+        const buttons = document.querySelectorAll('.tagging-filter-chip');
+        if (!buttons.length) return;
+        const currentFilter = this.state.tagging.filter;
+
+        buttons.forEach(btn => {
+            const isActive = btn.dataset.filter === currentFilter;
+            btn.classList.toggle('active', isActive);
+            btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+        });
+    }
+
 
 
 
@@ -1589,6 +1644,7 @@ class MemeApp {
 
 
         async loadTaggingImage() {
+            this.syncTaggingFilterButtons();
             // 获取当前状态
             let currentFile = null;
             if (this.state.tagging.file) {
