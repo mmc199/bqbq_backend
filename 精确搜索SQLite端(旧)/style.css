@@ -2,66 +2,89 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Custom Scrollbar */
+.custom-scrollbar::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+    background-color: #cbd5e1;
+    border-radius: 99px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background-color: #94a3b8;
+}
+
+/* Capsule Animation */
+.tag-capsule {
+    animation: popIn 0.2s cubic-bezier(0.18, 0.89, 0.32, 1.28);
+}
+
 @keyframes popIn {
-    0% { transform: scale(0.8); opacity: 0; }
+    0% { transform: scale(0.9); opacity: 0; }
     100% { transform: scale(1); opacity: 1; }
 }
 
-@keyframes fadeIn {
-    from { opacity: 0; transform: translateY(-10px); }
-    to { opacity: 1; transform: translateY(0); }
+/* Hourglass Spin Animation */
+.animate-hourglass {
+    animation: spin-hourglass 2s infinite ease-in-out;
 }
-
-/* 隐藏滚动条但保留功能 */
-.custom-scrollbar::-webkit-scrollbar {
-    width: 6px;
-}
-.custom-scrollbar::-webkit-scrollbar-thumb {
-    background-color: #e5e7eb;
-    border-radius: 10px;
-}
-
-/* [在文件末尾追加] */
-
-/* 沙漏旋转动画 */
-@keyframes spin-slow {
+@keyframes spin-hourglass {
     0% { transform: rotate(0deg); }
-    100% { transform: rotate(180deg); }
-}
-.loading-hourglass {
-    animation: spin-slow 1.5s infinite linear;
+    50% { transform: rotate(180deg); }
+    100% { transform: rotate(360deg); }
 }
 
-/* 隐藏 Input 的默认样式，用于胶囊输入 */
-.capsule-input {
-    min-width: 40px;
-    outline: none;
-    border: none;
-    background: transparent;
+/* Soft Delete Visuals */
+.is-trash {
+    border: 8px dashed #fca5a5 !important; /* red-300 */
+    background-color: #fef2f2; 
+    box-sizing: border-box;
+    position: relative;
 }
 
-/* 软删除状态 */
-.soft-deleted {
-    border: 2px solid #f87171 !important; /* red-400 */
-    background-color: #fff1f2; /* red-50 */
+/* Only show the gray mask and "Deleted" text if we are NOT 
+   explicitly in Trash Mode.
+   If we ARE in Trash Mode (.trash-mode-active), we want to see the content clearly.
+*/
+.is-trash::after {
+    content: "已删除";
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%) rotate(-15deg);
+    font-size: 1.5rem;
+    font-weight: 900;
+    color: #ef4444;
+    opacity: 0.3;
+    pointer-events: none;
+    z-index: 0;
 }
-.soft-deleted img {
-    opacity: 0.6;
+
+.is-trash img {
+    opacity: 0.5;
     filter: grayscale(100%);
 }
 
-/* 隐藏子 FAB 默认状态 */
-.sub-fab {
-    transform: scale(0);
-    opacity: 0;
-    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+/* Trash Mode Overrides (When searching for trash_bin) */
+.trash-mode-active .is-trash::after {
+    display: none;
 }
-.group:hover .sub-fab {
-    transform: scale(1);
+.trash-mode-active .is-trash img {
     opacity: 1;
+    filter: none;
 }
 
-/* 脚本中用到的虚线边框样式 */
-.dashed-border {
-    border: 2px dashed #93c5fd; /* blue-300 */
+/* Image Overlay Gradient */
+.image-overlay {
+    background: linear-gradient(to top, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.5) 0%, transparent 100%);
+    pointer-events: none;
+}
+.image-overlay > * {
+    pointer-events: auto;
+}
+.top-toolbar {
+    background: linear-gradient(to bottom, rgba(0,0,0,0.6) 0%, transparent 100%);
 }

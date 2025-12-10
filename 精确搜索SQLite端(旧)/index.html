@@ -4,87 +4,121 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>BQBQ 表情仓库</title>
+    <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
-    <link rel="stylesheet" href="style.css">
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <!-- Custom Styles -->
+    <link rel="stylesheet" href="/static/style.css">
 </head>
-<body class="bg-gray-50 h-screen flex flex-col overflow-hidden">
+<body class="bg-slate-50 text-slate-800 h-screen flex flex-col overflow-hidden">
 
-    <header class="h-14 bg-white border-b flex items-center justify-between px-4 z-10 shrink-0 gap-4">
-        <h1 class="font-bold text-xl text-blue-600 hidden md:block">📂 BQBQ</h1>
-        
-        <div class="flex-1 flex flex-col items-center justify-center group relative max-w-md mx-auto">
-            <div class="flex items-center w-full gap-2">
-                <span class="text-xs text-gray-400 font-mono">-10</span>
-                <input type="range" id="page-shuttle" min="-10" max="10" value="0" step="1" 
-                    class="flex-1 h-2 bg-gray-200 rounded-lg appearance-none cursor-ew-resize accent-blue-600">
-                <span class="text-xs text-gray-400 font-mono">+10</span>
-            </div>
-            <div id="page-indicator" class="absolute top-8 bg-black/80 text-white text-xs px-2 py-0.5 rounded opacity-0 pointer-events-none transition-opacity whitespace-nowrap z-50">
-                滑动翻页
-            </div>
-        </div>
-
-        <div class="flex gap-2 items-center">
-            <label class="flex items-center gap-1 cursor-pointer select-none">
-                <span class="text-xs font-bold text-gray-500">HD</span>
-                <input type="checkbox" id="hd-toggle" class="peer sr-only">
-                <div class="w-8 h-4 bg-gray-300 rounded-full peer-checked:bg-blue-600 peer-focus:ring-2 ring-blue-300 transition relative">
-                    <div class="w-4 h-4 bg-white rounded-full shadow absolute left-0 peer-checked:left-4 transition-all"></div>
-                </div>
-            </label>
-            
-            <div class="h-6 w-px bg-gray-200 mx-1"></div>
-            
-            <select id="sort-select" class="text-xs border rounded px-1 bg-gray-50 outline-none h-7">
-                <option value="date_desc">📅 最新</option>
-                <option value="date_asc">📅 最早</option>
-                <option value="size_desc">💾 最大</option>
-                <option value="res_desc">📐 高清</option>
-            </select>
-            <button onclick="app.exportData()" class="text-xs border px-2 h-7 rounded hover:bg-gray-100">备份</button>
+    <!-- Header: 全宽搜索栏 -->
+    <header class="h-16 bg-white/90 backdrop-blur border-b border-slate-200 flex items-center px-4 z-30 shrink-0 gap-2 shadow-sm">
+        <!-- Search Container -->
+        <div id="header-search-bar" class="flex-1 flex flex-wrap items-center gap-2 bg-slate-100 rounded-xl px-3 py-2 min-h-[50px] cursor-text transition-colors hover:bg-slate-50 focus-within:bg-white focus-within:ring-2 focus-within:ring-blue-100 border border-transparent focus-within:border-blue-300">
+            <!-- JS will inject TagInput here -->
         </div>
     </header>
 
-    <main id="gallery-view" class="flex-1 overflow-y-auto p-2 md:p-4 custom-scrollbar bg-gray-100">
-        <div id="grid-container" class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3 pb-40"></div>
+    <!-- Main Gallery -->
+    <main id="gallery-container" class="flex-1 overflow-y-auto p-4 custom-scrollbar relative bg-slate-50">
+        <!-- Grid: Square cards -->
+        <div id="meme-grid" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8 gap-4 pb-40">
+            <!-- Rendered by JS -->
+        </div>
+        
+        <!-- Loaders -->
+        <div id="loading-indicator" class="py-12 text-center text-slate-400 hidden">
+            <i data-lucide="loader-2" class="w-8 h-8 animate-spin mx-auto"></i>
+        </div>
+        
+        <div id="end-indicator" class="py-16 text-center text-sm font-bold text-slate-300 hidden">
+            - 到底了 -
+        </div>
     </main>
 
-    <div class="fixed bottom-6 right-6 flex flex-col items-center gap-3 group z-50">
-        <button onclick="app.clearSearch()" class="sub-fab w-10 h-10 bg-gray-500 text-white rounded-full shadow-lg flex items-center justify-center text-sm mb-1 hover:bg-gray-600" title="清除搜索">
-            ✕
-        </button>
-        <button onclick="app.doSearch()" class="sub-fab w-10 h-10 bg-blue-400 text-white rounded-full shadow-lg flex items-center justify-center text-sm hover:bg-blue-500" title="刷新搜索">
-            ↻
-        </button>
-        <button id="fab-search" class="w-14 h-14 bg-blue-600 rounded-full shadow-xl text-white text-2xl flex items-center justify-center hover:scale-110 transition">
-            🔍
-        </button>
+    <!-- Temp Tag Panel (Hidden by default) -->
+    <div id="temp-tag-panel" class="fixed bottom-28 right-24 bg-white rounded-xl shadow-2xl border border-slate-200 p-3 z-40 hidden w-64 flex-col gap-2 transform transition-all duration-200 origin-bottom-right">
+        <div class="text-xs font-bold text-slate-500 mb-1 flex justify-between">
+            <span>临时标签 (点击图片粘贴)</span>
+            <span id="close-temp-panel" class="cursor-pointer hover:text-red-500">&times;</span>
+        </div>
+        <div id="temp-tag-input-container" class="flex flex-wrap gap-1 bg-slate-50 p-2 rounded border border-slate-200 min-h-[40px] cursor-text">
+           <!-- JS will inject TagInput here -->
+        </div>
+        <button id="clear-temp-tags" class="text-xs text-blue-600 hover:underline text-left">清空</button>
     </div>
-    
 
-    <button id="fab-upload" class="fixed bottom-6 left-6 w-12 h-12 bg-green-500 rounded-full shadow-xl text-white text-xl flex items-center justify-center hover:scale-110 transition z-50" onclick="document.getElementById('file-upload-input').click()">
-        ➕
-    </button>
-    <input type="file" id="file-upload-input" class="hidden" multiple accept="image/*" onchange="app.handleDirectUpload(this)">
+    <!-- Sort Menu (Hidden by default) -->
+    <div id="sort-menu" class="fixed bottom-28 right-8 bg-white rounded-xl shadow-xl border border-slate-200 py-2 z-40 hidden flex-col w-40 origin-bottom-right">
+        <button data-sort="date_desc" class="sort-option px-4 py-2 text-sm text-left hover:bg-slate-50 text-blue-600 font-bold">📅 最新添加</button>
+        <button data-sort="date_asc" class="sort-option px-4 py-2 text-sm text-left hover:bg-slate-50 text-slate-600">📅 最早添加</button>
+        <button data-sort="size_desc" class="sort-option px-4 py-2 text-sm text-left hover:bg-slate-50 text-slate-600">💾 文件很大</button>
+        <button data-sort="size_asc" class="sort-option px-4 py-2 text-sm text-left hover:bg-slate-50 text-slate-600">💾 文件很小</button>
+        <button data-sort="resolution_desc" class="sort-option px-4 py-2 text-sm text-left hover:bg-slate-50 text-slate-600">📐 高分辨率</button>
+        <button data-sort="resolution_asc" class="sort-option px-4 py-2 text-sm text-left hover:bg-slate-50 text-slate-600">📐 低分辨率</button>
+    </div>
 
+    <!-- Floating Action Buttons (Stack) -->
+    <div class="fixed top-1/2 -translate-y-1/2 right-8 grid grid-cols-2 gap-3 z-50">
+        
+        <div class="w-14 h-14 pointer-events-none"></div>
+        
+        <!-- Temp Tags Trigger -->
+        <button id="fab-temp-tags" class="w-14 h-14 bg-white hover:bg-purple-50 text-purple-600 border border-purple-100 rounded-2xl shadow-lg hover:shadow-xl hover:scale-105 transition-all flex items-center justify-center relative group" title="临时标签粘贴模式">
+            <i data-lucide="stamp" class="w-6 h-6"></i>
+             <span class="absolute right-full mr-3 bg-slate-800 text-white text-xs px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition whitespace-nowrap pointer-events-none">临时标签</span>
+        </button>
 
-    <div id="search-modal" class="fixed inset-0 bg-black/50 backdrop-blur-sm hidden z-[100] flex items-start justify-center pt-[15vh]">
-        <div class="bg-white w-[90%] max-w-2xl rounded-2xl shadow-2xl overflow-hidden flex flex-col animate-[fadeIn_0.2s_ease-out]">
-            <div class="p-4 bg-gray-50 border-b text-sm text-gray-500 flex justify-between">
-                <span>空格=并集(AND) | 逗号=合集(OR) | 减号=排除(NOT)</span>
-                <button onclick="document.getElementById('search-modal').classList.add('hidden')" class="text-xl hover:text-red-500">&times;</button>
-            </div>
+        <!-- Sort Trigger -->
+        <button id="fab-sort" class="w-14 h-14 bg-white hover:bg-slate-50 text-slate-600 border border-slate-200 rounded-2xl shadow-lg hover:shadow-xl hover:scale-105 transition-all flex items-center justify-center relative group" title="排序">
+            <i data-lucide="arrow-up-down" class="w-6 h-6"></i>
+        </button>
+        
+
+        <!-- HQ Toggle -->
+        <button id="fab-hq" class="w-14 h-14 bg-white hover:bg-slate-50 text-slate-400 border border-slate-200 rounded-2xl shadow-lg hover:shadow-xl hover:scale-105 transition-all flex items-center justify-center flex-col relative group" title="HQ 原图模式">
+            <span class="text-[10px] font-black leading-none mb-0.5">HQ</span>
+            <div id="hq-status-dot" class="w-2 h-2 rounded-full bg-slate-300 transition-colors"></div>
+        </button>
+
+        <!-- Trash Bin Toggle (Search Filter) -->
+        <button id="fab-trash" class="w-14 h-14 bg-white hover:bg-red-50 text-slate-400 border border-slate-200 rounded-2xl shadow-lg hover:shadow-xl hover:scale-105 transition-all flex items-center justify-center relative group" title="显示回收站内容">
+            <i data-lucide="trash-2" class="w-6 h-6"></i>
+            <div id="trash-active-dot" class="absolute top-3 right-3 w-2.5 h-2.5 bg-red-500 rounded-full border-2 border-white hidden"></div>
+        </button>
+
+        <!-- Upload -->
+        <button id="fab-upload" class="w-14 h-14 bg-emerald-500 hover:bg-emerald-600 text-white rounded-2xl shadow-lg hover:shadow-xl hover:scale-105 transition-all flex items-center justify-center group relative">
+            <i data-lucide="plus" class="w-7 h-7"></i>
+            <input type="file" id="file-upload" class="hidden" multiple accept="image/*">
+        </button>
+
+        <!-- Main Search (Focus) + Satellites -->
+        <div class="relative group">
+            <button id="fab-search" class="w-14 h-14 bg-blue-600 hover:bg-blue-700 text-white rounded-2xl shadow-xl hover:shadow-2xl hover:scale-105 transition-all flex items-center justify-center z-20 relative">
+                <i data-lucide="search" class="w-7 h-7"></i>
+            </button>
             
-            <div id="capsule-container" class="p-4 cursor-text bg-white"></div>
+            <!-- Clear Tags Button (Satellite Top) -->
+            <button id="clear-search-btn" class="absolute -top-2 -left-2 w-8 h-8 bg-white text-slate-600 border border-slate-200 rounded-full shadow-md flex items-center justify-center hover:bg-red-50 hover:text-red-500 transition-all z-30 group-hover:opacity-100" title="清空标签">
+                <i data-lucide="x" class="w-4 h-4"></i>
+            </button>
 
-            <button onclick="app.doSearch()" class="w-full py-4 bg-blue-600 text-white font-bold hover:bg-blue-700">开始搜索</button>
+            <!-- Refresh Button (Satellite Bottom) -->
+            <button id="reload-search-btn" class="absolute -bottom-2 -left-2 w-8 h-8 bg-white text-slate-600 border border-slate-200 rounded-full shadow-md flex items-center justify-center hover:bg-slate-100 hover:text-blue-600 transition-all z-30" title="刷新">
+                <i data-lucide="refresh-cw" class="w-4 h-4"></i>
+            </button>
         </div>
     </div>
 
+    <!-- Datalist for Autocomplete -->
     <datalist id="tag-suggestions"></datalist>
 
-    <input type="hidden" id="qq-id-input" value="web_user">
-
-    <script src="script.js"></script>
+    <script src="/static/script.js"></script>
+    <script>
+        lucide.createIcons();
+    </script>
 </body>
 </html>
