@@ -1,0 +1,238 @@
+<template page>
+  <style>
+    :host {
+      display: block;
+    }
+
+    .main {
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      gap: 16px;
+      margin: 0px 16px 16px 16px;
+    }
+
+    .card-container {
+      max-width: none;
+      width: 100%;
+      text-align: center;
+      padding: 24px;
+    }
+
+    .container {
+      display: flex;
+      gap: 16px;
+      flex-direction: column;
+      width: 100%;
+      padding: 24px;
+      text-align: center;
+    }
+
+    .mode-header {
+      height: 24px;
+      margin-bottom: 12px;
+      font-size: 14px;
+      color: #666;
+    }
+
+    .container>* {
+      margin: 0 auto;
+    }
+
+    s-text-field {
+      margin: 8px;
+    }
+
+    .result-header {
+      height: 24px;
+      margin-bottom: 12px;
+      font-size: 14px;
+      color: #666;
+    }
+
+    .result-content {
+      height: 100%;
+    }
+
+    .result-content-inner {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      flex-direction: row;
+      align-content: center;
+      justify-content: center;
+      margin: 16px;
+    }
+
+    .result-item {
+      position: relative;
+      width: 256px;
+      height: 256px;
+    }
+
+    .result-item .overlay {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      gap: 16px;
+      flex-direction: row;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-content: space-between;
+      transition: opacity .18s ease;
+      pointer-events: none;
+      padding: 10px;
+    }
+
+    .result-item .overlay .corner {
+      flex: calc(50% - 16px);
+      pointer-events: auto;
+    }
+
+    .result-item img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }
+
+    .load-more {
+      margin-bottom: 16px;
+    }
+  </style>
+  <link rel="stylesheet" href="./../css/public.css" />
+  <div class="main">
+    <s-card class="container card-container">
+      <s-segmented-button id="searchMode" mode="auto" on:change="changeSearchMode">
+        <x-fill :value="searchModes">
+          <s-segmented-button-item>
+            {{$data.title}}
+          </s-segmented-button-item>
+        </x-fill>
+      </s-segmented-button>
+      <div style="color: gray;">
+        {{searchModes[defaultSearchMode].tips}}
+      </div>
+      <div id="conditions">
+        <x-fill :value="searchModes[defaultSearchMode].input">
+          <s-text-field countered="true" maxLength="100" attr:type="$data.type" attr:label="$data.name" on:keydown="$host.handleInput($event)">
+            <s-icon-button slot="end" on:click="$host.clearInput($event)">
+              <s-icon name="close"></s-icon>
+            </s-icon-button>
+          </s-text-field>
+        </x-fill>
+      </div>
+      <div id="search">
+        <s-button on:click="search()">
+          <s-icon slot="start" name="search"></s-icon>
+          开始搜索
+        </s-button>
+      </div>
+    </s-card>
+    <s-card class="card-container" style="flex: 1;">
+      <div class="result-header">
+        搜索结果：共 {{results.length}} / {{total}} 张表情包
+      </div>
+      <div>
+        <s-divider></s-divider>
+      </div>
+      <s-scroll-view class="result-content">
+        <x-if :value="results.length === 0">
+          <s-empty>暂时没有数据</s-empty>
+        </x-if>
+        <x-else>
+          <div class="result-content-inner">
+            <x-fill :value="results">
+              <s-card class="result-item">
+                <div class="overlay">
+                  <div class="corner left">TL</div>
+                  <div class="corner right">TR</div>
+                  <div class="corner left">BL</div>
+                  <div class="corner right">BR</div>
+                </div>
+                <img attr:src="API_HOST+$data.thumbnail_url" attr:alt="$data.filename" loading="lazy" />
+              </s-card>
+            </x-fill>
+          </div>
+          <x-if :value="results.length < total">
+            <s-button class="load-more" on:click="loadMore">
+              加载更多
+            </s-button>
+          </x-if>
+        </x-else>
+      </s-scroll-view>
+    </s-card>
+  </div>
+  <script>
+    export default {
+      parent: "./layout.html",
+      data: {
+        defaultSearchMode: 0,
+        searchModes: [
+          {
+            title: "🔍 精确搜索",
+            tips: "包含标签为“且 (AND)”关系，必须同时满足。",
+            input: [
+              { type: "text", name: "包含标签，例如: 熊猫头, 震惊...", key: "include" },
+              { type: "text", name: "排除标签，例如: 模糊...", key: "exclude" },
+            ],
+            api: "/api/search"
+          },
+          {
+            title: "🧠 语义搜索",
+            tips: "输入自然语言描述，AI 将尝试理解图片的语义。",
+            input: [
+              { type: "text", name: "描述内容，例如: 看起来很困的猫...", key: "q" },
+            ],
+            api: "/api/semantic_search"
+          }
+        ],
+        results: [],
+        total: 0,
+        limit: 40,
+      },
+      proto: {
+        changeSearchMode(e) {
+          this.defaultSearchMode = e.target.selectedIndex;
+        },
+        getParams(offset = 0) {
+          const mode = this.searchModes[this.defaultSearchMode];
+          const inputMap = mode.input.reduce((acc, cur) => {
+            acc[cur.key] = this.shadow.$(`#conditions s-text-field[label="${cur.name}"]`).ele.value || "";
+            return acc;
+          }, {});
+          const params = new URLSearchParams({
+            ...inputMap,
+            offset,
+            limit: this.limit,
+          });
+          return params;
+        },
+        async loadMore() {
+          const mode = this.searchModes[this.defaultSearchMode];
+          const params = this.getParams(this.results.length);
+          const result = await debounceFetch(`${mode.api}?${params.toString()}`).then(res => res.json())
+          this.results = this.results.concat(result.results);
+          this.total = result.total;
+        },
+        async search() {
+          this.results = [];
+          await this.loadMore();
+        },
+        handleInput(e) {
+          if (e.key === 'Enter') {
+            this.search();
+          }
+        },
+        clearInput(e) {
+          const input = e.target.closest('s-text-field')
+          input.value = '';
+        },
+      },
+      attached() {
+        const searchMode = this.shadow.$('#searchMode');
+        const mode = searchMode.all('s-segmented-button-item')
+        mode[this.defaultSearchMode].ele.click();
+      },
+    };
+  </script>
+</template>
