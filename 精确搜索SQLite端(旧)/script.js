@@ -538,10 +538,21 @@ class MemeApp {
      * 核心：处理规则树的写入操作，包含乐观锁、冲突检测和自动重放。
      * @param {object} action - 包含 url 和 method 的操作定义。
      * @param {object} payload - 包含 group_id, keyword 等业务参数。
+     * @param {number} retryCount - 当前重试次数（防止无限递归）
      * @returns {Promise<object>} 包含 success 状态和 version_id 的结果对象。
      */
 
-    async handleSave(action, payload) {
+    async handleSave(action, payload, retryCount = 0) {
+        const MAX_RETRIES = 3; // 最大重试次数
+
+        // 防止无限递归
+        if (retryCount >= MAX_RETRIES) {
+            console.error(`Max retries (${MAX_RETRIES}) exceeded for action ${action.type}`);
+            this.showToast('保存失败：冲突次数过多，请稍后重试。', 'error');
+            await this.loadRulesTree(true); // 强制同步最新数据
+            return { success: false, error: 'max_retries_exceeded' };
+        }
+
         let currentVersion = this.state.rulesBaseVersion;
         const client_id = this.state.clientId;
 
@@ -552,10 +563,7 @@ class MemeApp {
         if (optimisticSuccess) {
             this.renderRulesTree(); // 渲染新的本地状态
         }
-        
-        // --- 1. 乐观更新（TODO: 预先修改 this.state.rulesTree） ---
-        // Optimistic Update Here: this.updateRulesTreeOptimistically(action, payload);
-        
+
         try {
             const response = await fetch(action.url, {
                 method: action.method,
@@ -569,34 +577,32 @@ class MemeApp {
 
             if (response.status === 409) {
                 const conflictData = await response.json();
-                console.warn(`Conflict detected! Base version ${currentVersion}, server has updated. Unique modifiers: ${conflictData.unique_modifiers}`);
-                
+                console.warn(`Conflict detected (retry ${retryCount + 1}/${MAX_RETRIES})! Base version ${currentVersion}, server has updated. Unique modifiers: ${conflictData.unique_modifiers}`);
+
                 // --- 冲突处理 (409) ---
-                
+
                 // A. 静默更新基准数据
                 this.state.rulesBaseVersion = conflictData.latest_data.version_id;
                 localStorage.setItem(RULES_VERSION_KEY, conflictData.latest_data.version_id.toString());
-                
+
                 // 重新构建本地规则树 (使用服务器最新的数据)
                 const newRulesTree = this.buildTree(conflictData.latest_data);
                 this.state.rulesTree = newRulesTree;
-                
+
                 // B. 预演/检查有效性
-                // TODO: checkIfActionStillValid(payload, this.state.rulesTree);
                 const stillValid = this.checkIfActionStillValid(actionType, payload, newRulesTree);
 
                 if (stillValid) {
-                    // C. 自动重放
-                    console.log("Action still valid, attempting automatic replay with new base version.");
-                    
-                    // 递归调用 handleSave，但跳过乐观更新步骤 (因为数据已经是最新的)
-                    const replayResult = await this.handleSave(action, payload); 
-                    
+                    // C. 自动重放（递归调用，但带重试计数）
+                    console.log(`Action still valid, attempting automatic replay (attempt ${retryCount + 1}/${MAX_RETRIES})`);
+
+                    const replayResult = await this.handleSave(action, payload, retryCount + 1);
+
                     if (replayResult.success) {
                         // 提示用户合并成功
                         this.showToast(`已自动同步并保存成功！期间有 ${conflictData.unique_modifiers} 人修改过规则。`, 'success');
                     }
-                    return replayResult; 
+                    return replayResult;
 
                 } else {
                     // D. 预演无效，强制刷新 UI 为最新数据
@@ -605,35 +611,37 @@ class MemeApp {
                     alert(`保存失败！您尝试的操作不再有效，请刷新页面重新编辑。期间有 ${conflictData.unique_modifiers} 人修改过规则。`);
                     return { success: false, conflict: true };
                 }
-                
+
             }
-            
+
             if (response.ok) {
                 const result = await response.json();
-                
+
                 // 2. 写入成功，更新本地版本号
                 this.state.rulesBaseVersion = result.version_id;
                 localStorage.setItem(RULES_VERSION_KEY, result.version_id.toString());
-                
+
                 console.log(`Save successful. New version: ${result.version_id}`);
-                
+
                 // 3. 重新拉取规则树（确保UI与服务器状态一致）
                 // 仅在成功后刷新版本和 UI，避免额外 API 调用
-                this.renderRulesTree(); 
-                
-                this.showToast('规则保存成功！', 'success');
-                
+                this.renderRulesTree();
+
+                if (retryCount === 0) {
+                    this.showToast('规则保存成功！', 'success');
+                } // 重试成功的提示已在上面的冲突处理中显示
+
                 return { success: true, version_id: result.version_id };
             }
-            
+
             throw new Error(`Server returned error status: ${response.status}`);
-            
+
         } catch (e) {
             console.error("Save failed (final):", e);
             // E. 最终失败，回滚本地乐观更新 (如果需要)
-            // this.revertOptimisticUpdate(actionType, payload); 
+            // this.revertOptimisticUpdate(actionType, payload);
             this.renderRulesTree(); // 简单粗暴：强制刷新回上次成功状态
-            
+
             this.showToast('保存失败：网络或服务器错误。', 'error');
             return { success: false, error: e.message };
         }

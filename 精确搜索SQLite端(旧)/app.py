@@ -38,15 +38,16 @@ class MemeService:
     @staticmethod
     def init_db():
         with MemeService.get_conn() as conn:
+            # 创建表结构
             conn.execute("""CREATE TABLE IF NOT EXISTS images (
-                md5 TEXT PRIMARY KEY, filename TEXT, created_at REAL, 
+                md5 TEXT PRIMARY KEY, filename TEXT, created_at REAL,
                 width INTEGER DEFAULT 0, height INTEGER DEFAULT 0, size INTEGER DEFAULT 0
             )""")
             conn.execute("CREATE TABLE IF NOT EXISTS tags_dict (name TEXT PRIMARY KEY, use_count INTEGER DEFAULT 0)")
             try:
                 conn.execute("CREATE VIRTUAL TABLE images_fts USING fts5(md5 UNINDEXED, tags_text)")
             except sqlite3.OperationalError:
-                pass 
+                pass
 
             conn.execute("""CREATE TABLE IF NOT EXISTS search_groups (
                 group_id INTEGER PRIMARY KEY, group_name TEXT NOT NULL, is_enabled BOOLEAN DEFAULT 1
@@ -68,9 +69,21 @@ class MemeService:
             conn.execute("""CREATE TABLE IF NOT EXISTS search_version_log (
                 version_id INTEGER PRIMARY KEY, modifier_id TEXT, updated_at REAL
             )""")
-            
+
+            # 创建性能优化索引
+            try:
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_keywords_group ON search_keywords(group_id)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_hierarchy_child ON search_hierarchy(child_id)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_hierarchy_parent ON search_hierarchy(parent_id)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_images_created ON images(created_at DESC)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_images_size ON images(size DESC)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_images_resolution ON images(height DESC, width DESC)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_version_log_time ON search_version_log(updated_at DESC)")
+            except sqlite3.OperationalError as e:
+                print(f"Index creation warning (may already exist): {e}")
+
             # 插入初始 Meta 记录
-            conn.execute("INSERT OR IGNORE INTO system_meta (key, version_id, last_updated_at) VALUES (?, 0, ?)", 
+            conn.execute("INSERT OR IGNORE INTO system_meta (key, version_id, last_updated_at) VALUES (?, 0, ?)",
                         ('rules_state', time.time()))
             conn.commit()
 
@@ -129,15 +142,65 @@ class MemeService:
         return write_func
     
     @staticmethod
+    def has_hierarchy_cycle(conn, parent_id, child_id):
+        """
+        检测添加 parent_id -> child_id 关系是否会形成环路。
+
+        算法：从 child_id 开始，沿着 parent 方向 DFS，如果能走到 parent_id，则形成环。
+
+        Args:
+            conn: 数据库连接
+            parent_id: 待添加的父节点ID
+            child_id: 待添加的子节点ID
+
+        Returns:
+            bool: True 表示会形成环，False 表示安全
+        """
+        if parent_id == child_id:
+            return True  # 自引用必然成环
+
+        visited = set()
+
+        def dfs(current_node):
+            """从 current_node 向上查找所有父节点"""
+            if current_node == parent_id:
+                return True  # 找到目标节点，形成环
+
+            if current_node in visited:
+                return False  # 已访问过，避免无限循环
+
+            visited.add(current_node)
+
+            # 查找 current_node 的所有父节点
+            parents = conn.execute(
+                "SELECT parent_id FROM search_hierarchy WHERE child_id=?",
+                (current_node,)
+            ).fetchall()
+
+            # 递归检查每个父节点
+            for parent_row in parents:
+                if dfs(parent_row['parent_id']):
+                    return True
+
+            return False
+
+        # 从 child_id 开始向上查找
+        return dfs(child_id)
+
+    @staticmethod
     def add_hierarchy(parent_id, child_id):
-        """建立父子关系 (层级拖拽)"""
+        """建立父子关系 (层级拖拽) - 增强版循环检测"""
         def write_func(conn):
             # 检查父ID和子ID是否相同
             if parent_id == child_id:
                 raise ValueError("Cannot link group to itself")
-            
+
+            # 检查是否会形成环路（关键修复）
+            if MemeService.has_hierarchy_cycle(conn, parent_id, child_id):
+                raise ValueError("Cannot create cycle in hierarchy")
+
             # 插入新关系，忽略已存在
-            conn.execute("INSERT OR IGNORE INTO search_hierarchy (parent_id, child_id) VALUES (?, ?)", 
+            conn.execute("INSERT OR IGNORE INTO search_hierarchy (parent_id, child_id) VALUES (?, ?)",
                         (parent_id, child_id))
         return write_func
     
@@ -159,58 +222,68 @@ class MemeService:
 
     @staticmethod
     def try_write(base_version, client_id, write_func):
-        """核心乐观锁和冲突处理逻辑"""
-        
+        """核心乐观锁和冲突处理逻辑（修复版）"""
+
         result_value = None # 用于存储 write_func 可能返回的值 (如新 ID)
 
-
         with MemeService.get_conn() as conn:
-            conn.execute("BEGIN EXCLUSIVE TRANSACTION")
             try:
-                meta = conn.execute("SELECT version_id FROM system_meta WHERE key='rules_state'").fetchone()
-                current_version = meta['version_id']
+                # 开始独占事务
+                conn.execute("BEGIN EXCLUSIVE TRANSACTION")
 
+                # 读取当前版本号
+                meta = conn.execute("SELECT version_id FROM system_meta WHERE key='rules_state'").fetchone()
+                current_version = meta['version_id'] if meta else 0
+
+                # 版本冲突检测
                 if current_version != base_version:
-                    # 冲突处理
+                    # 显式回滚事务，释放锁
+                    conn.rollback()
+
+                    # 在事务外重新查询最新数据（避免持有锁）
                     conflict_count_row = conn.execute(
-                        "SELECT COUNT(DISTINCT modifier_id) FROM search_version_log WHERE version_id > ?", 
+                        "SELECT COUNT(DISTINCT modifier_id) FROM search_version_log WHERE version_id > ?",
                         (base_version,)
                     ).fetchone()
-                    
+
                     latest_data = MemeService.get_rules_data(conn)
-                    
+
                     return {
-                        "success": False, 
-                        "status": 409, 
+                        "success": False,
+                        "status": 409,
                         "error": "conflict",
                         "latest_data": latest_data,
-                        "unique_modifiers": conflict_count_row[0]
+                        "unique_modifiers": conflict_count_row[0] if conflict_count_row else 0
                     }
-                
+
                 # 执行写操作（write_func 必须接收 conn 参数）
                 result_value = write_func(conn)
 
-                # 更新版本号
+                # 更新版本号和日志
                 new_version = current_version + 1
                 now = time.time()
-                conn.execute("UPDATE system_meta SET version_id=?, last_updated_at=? WHERE key='rules_state'", 
+                conn.execute("UPDATE system_meta SET version_id=?, last_updated_at=? WHERE key='rules_state'",
                             (new_version, now))
-                conn.execute("INSERT INTO search_version_log (version_id, modifier_id, updated_at) VALUES (?, ?, ?)", 
+                conn.execute("INSERT INTO search_version_log (version_id, modifier_id, updated_at) VALUES (?, ?, ?)",
                             (new_version, client_id, now))
-                
+
+                # 提交事务
                 conn.commit()
 
                 response_data = {"success": True, "version_id": new_version, "status": 200}
-            
+
                 if result_value is not None:
-                        # 如果 write_func 返回了值，将其添加到响应中 (例如 group/add 返回 new_id)
-                        response_data['new_id'] = result_value
-                        
+                    # 如果 write_func 返回了值，将其添加到响应中 (例如 group/add 返回 new_id)
+                    response_data['new_id'] = result_value
+
                 return response_data
 
             except Exception as e:
+                # 确保异常时回滚
                 conn.rollback()
                 print(f"Transaction failed: {e}")
+                import traceback
+                traceback.print_exc()  # 打印完整堆栈，便于调试
                 return {"success": False, "status": 500, "error": str(e)}
 
     @staticmethod
@@ -300,27 +373,47 @@ class MemeService:
 
     @staticmethod
     def _create_thumbnail_file(source_path, thumb_path):
-        """使用指定的参数生成缩略图"""
+        """
+        使用指定的参数生成缩略图
+
+        Returns:
+            bool: True 表示成功，False 表示失败
+        """
         try:
             with Image.open(source_path) as img:
                 frame = MemeService._extract_random_frame(img)
-                
+
                 # 转换模式，确保兼容 JPEG
-                if frame.mode not in ("RGB", "L"): 
+                if frame.mode not in ("RGB", "L"):
                     frame = frame.convert("RGB")
-                elif frame.mode == "L": 
+                elif frame.mode == "L":
                     frame = frame.convert("RGB") # 强制转RGB以保持一致性
-                
+
                 # 缩放
                 frame.thumbnail((THUMBNAIL_MAX_SIZE, THUMBNAIL_MAX_SIZE), Image.LANCZOS)
-                
+
                 # 确保目录存在
                 os.makedirs(os.path.dirname(thumb_path), exist_ok=True)
-                
+
                 # 保存为 JPEG
                 frame.save(thumb_path, "JPEG", quality=85, optimize=True)
+                return True
+
         except Exception as e:
             print(f"Thumbnail generation failed for {source_path}: {e}")
+            import traceback
+            traceback.print_exc()
+
+            # 尝试复制原图作为缩略图（降级方案）
+            try:
+                import shutil
+                print(f"Attempting to copy original as thumbnail fallback...")
+                shutil.copy(source_path, thumb_path)
+                print(f"Fallback successful: copied {source_path} to {thumb_path}")
+                return True
+            except Exception as fallback_error:
+                print(f"Fallback copy also failed: {fallback_error}")
+                return False
 
     @staticmethod
     def handle_upload(file_obj):
