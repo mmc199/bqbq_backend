@@ -2,89 +2,104 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Custom Scrollbar */
 .custom-scrollbar::-webkit-scrollbar {
-    width: 6px;
-    height: 6px;
+width: 6px;
+height: 6px;
 }
 .custom-scrollbar::-webkit-scrollbar-track {
-    background: transparent;
+background: transparent;
 }
 .custom-scrollbar::-webkit-scrollbar-thumb {
-    background-color: #cbd5e1;
-    border-radius: 99px;
+background-color: #cbd5e1;
+border-radius: 99px;
 }
 .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-    background-color: #94a3b8;
+background-color: #94a3b8;
 }
 
-/* Capsule Animation */
 .tag-capsule {
-    animation: popIn 0.2s cubic-bezier(0.18, 0.89, 0.32, 1.28);
+animation: popIn 0.2s cubic-bezier(0.18, 0.89, 0.32, 1.28);
 }
-
 @keyframes popIn {
-    0% { transform: scale(0.9); opacity: 0; }
-    100% { transform: scale(1); opacity: 1; }
+0% { transform: scale(0.9); opacity: 0; }
+100% { transform: scale(1); opacity: 1; }
 }
 
-/* Hourglass Spin Animation */
-.animate-hourglass {
-    animation: spin-hourglass 2s infinite ease-in-out;
+.animate-spin-fast {
+animation: spin 0.8s linear infinite;
 }
-@keyframes spin-hourglass {
-    0% { transform: rotate(0deg); }
-    50% { transform: rotate(180deg); }
-    100% { transform: rotate(360deg); }
+@keyframes spin {
+to { transform: rotate(360deg); }
 }
 
-/* Soft Delete Visuals */
 .is-trash {
-    border: 8px dashed #fca5a5 !important; /* red-300 */
-    background-color: #fef2f2; 
-    box-sizing: border-box;
-    position: relative;
+border: 8px dashed #fca5a5 !important;
+background-color: #fef2f2;
+box-sizing: border-box;
+position: relative;
 }
 
-/* Only show the gray mask and "Deleted" text if we are NOT 
-   explicitly in Trash Mode.
-   If we ARE in Trash Mode (.trash-mode-active), we want to see the content clearly.
-*/
 .is-trash::after {
-    content: "已删除";
-    position: absolute;
-    top: 50%; left: 50%;
-    transform: translate(-50%, -50%) rotate(-15deg);
-    font-size: 1.5rem;
-    font-weight: 900;
-    color: #ef4444;
-    opacity: 0.3;
-    pointer-events: none;
-    z-index: 0;
+content: "已删除";
+position: absolute;
+top: 50%; left: 50%;
+transform: translate(-50%, -50%) rotate(-15deg);
+font-size: 1.5rem;
+font-weight: 900;
+color: #ef4444;
+opacity: 0.3;
+pointer-events: none;
+z-index: 0;
 }
-
 .is-trash img {
-    opacity: 0.5;
-    filter: grayscale(100%);
+opacity: 0.5;
+filter: grayscale(100%);
 }
 
-/* Trash Mode Overrides (When searching for trash_bin) */
+.load-failed img {
+opacity: 0.3;
+filter: grayscale(100%);
+}
+
+.error-overlay {
+background-color: transparent !important;
+}
+
 .trash-mode-active .is-trash::after {
-    display: none;
+display: none;
 }
 .trash-mode-active .is-trash img {
-    opacity: 1;
-    filter: none;
+opacity: 1;
+filter: none;
 }
 
-/* Image Overlay Gradient */
 .image-overlay {
-    background: linear-gradient(to top, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.5) 0%, transparent 100%);
-    pointer-events: none;
+background: linear-gradient(to top, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.0) 0%, transparent 100%);
+pointer-events: none;
 }
 .image-overlay > * {
-    pointer-events: auto;
+pointer-events: auto;
 }
+
 .top-toolbar {
-    background: linear-gradient(to bottom, rgba(0,0,0,0.6) 0%, transparent 100%);
+background-color: rgba(0,0,0,0.0);
+}
+
+.image-info {
+    text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.8), 
+                -1px -1px 2px rgba(0, 0, 0, 0.8); /* 柔和的黑色阴影 */
+}
+
+.overlay-tag {
+background-color: rgba(255, 255, 255, 0.2);
+border: 1px solid rgba(255, 255, 255, 0.1);
+
+text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.8), /* 柔和的双层阴影 */
+            -1px -1px 2px rgba(0, 0, 0, 0.8);
+
+overflow-wrap: break-all; 
+max-width: 100%; 
+display: block; 
+
+
 }

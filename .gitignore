@@ -211,3 +211,7 @@ __marimo__/
 语义搜索es端(新)/__init__.py
 精确搜索SQLite端(旧)/meme_images
 精确搜索SQLite端(旧)/meme_images_thumbnail
+精确搜索SQLite端(旧)/v2/style.css
+精确搜索SQLite端(旧)/v2/app.py
+精确搜索SQLite端(旧)/v2/script.js
+精确搜索SQLite端(旧)/v2/index.html

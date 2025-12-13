@@ -8,6 +8,7 @@ import random  # 新增: 用于随机抽取帧
 from flask import Flask, send_file, send_from_directory, request, jsonify
 from flask_cors import CORS
 from PIL import Image
+from flask import abort
 
 # --- Configuration ---
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
@@ -47,6 +48,32 @@ class MemeService:
             except sqlite3.OperationalError:
                 pass 
 
+            conn.execute("""CREATE TABLE IF NOT EXISTS search_groups (
+                group_id INTEGER PRIMARY KEY, group_name TEXT NOT NULL, is_enabled BOOLEAN DEFAULT 1
+            )""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS search_keywords (
+                keyword TEXT NOT NULL, group_id INTEGER, is_enabled BOOLEAN DEFAULT 1,
+                FOREIGN KEY (group_id) REFERENCES search_groups(group_id),
+                PRIMARY KEY (keyword, group_id)
+            )""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS search_hierarchy (
+                parent_id INTEGER, child_id INTEGER,
+                FOREIGN KEY (parent_id) REFERENCES search_groups(group_id),
+                FOREIGN KEY (child_id) REFERENCES search_groups(group_id),
+                PRIMARY KEY (parent_id, child_id)
+            )""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS system_meta (
+                key TEXT PRIMARY KEY, version_id INTEGER DEFAULT 0, last_updated_at REAL
+            )""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS search_version_log (
+                version_id INTEGER PRIMARY KEY, modifier_id TEXT, updated_at REAL
+            )""")
+            
+            # 插入初始 Meta 记录
+            conn.execute("INSERT OR IGNORE INTO system_meta (key, version_id, last_updated_at) VALUES (?, 0, ?)", 
+                        ('rules_state', time.time()))
+            conn.commit()
+
     @staticmethod
     def update_index(md5, tags):
         # ... (保持不变) ...
@@ -62,6 +89,139 @@ class MemeService:
                 conn.execute("INSERT OR IGNORE INTO tags_dict (name, use_count) VALUES (?, 0)", (t,))
                 conn.execute("UPDATE tags_dict SET use_count = use_count + 1 WHERE name = ?", (t,))
             conn.commit()
+
+    @staticmethod
+    def get_rules_data(conn):
+        """获取所有规则的扁平化 JSON 结构和当前版本号"""
+        meta = conn.execute("SELECT version_id FROM system_meta WHERE key='rules_state'").fetchone()
+        current_version = meta['version_id'] if meta else 0
+
+        groups = conn.execute("SELECT * FROM search_groups").fetchall()
+        keywords = conn.execute("SELECT * FROM search_keywords").fetchall()
+        hierarchy = conn.execute("SELECT * FROM search_hierarchy").fetchall()
+
+        return {
+            "version_id": current_version,
+            "groups": [dict(row) for row in groups],
+            "keywords": [dict(row) for row in keywords],
+            "hierarchy": [dict(row) for row in hierarchy]
+        }
+    
+    @staticmethod
+    def add_group(group_name):
+        """创建一个新组"""
+        def write_func(conn):
+            # 获取当前最大的 group_id 并 +1 作为新 ID (简单实现)
+            max_id = conn.execute("SELECT MAX(group_id) FROM search_groups").fetchone()[0]
+            new_id = (max_id or 0) + 1
+            
+            conn.execute("INSERT INTO search_groups (group_id, group_name) VALUES (?, ?)", 
+                        (new_id, group_name))
+            return new_id # 返回新 ID 供前端使用
+        return write_func
+
+    @staticmethod
+    def update_group(group_id, group_name, is_enabled):
+        """更新组名或软删状态"""
+        def write_func(conn):
+            conn.execute("UPDATE search_groups SET group_name=?, is_enabled=? WHERE group_id=?", 
+                        (group_name, is_enabled, group_id))
+        return write_func
+    
+    @staticmethod
+    def add_hierarchy(parent_id, child_id):
+        """建立父子关系 (层级拖拽)"""
+        def write_func(conn):
+            # 检查父ID和子ID是否相同
+            if parent_id == child_id:
+                raise ValueError("Cannot link group to itself")
+            
+            # 插入新关系，忽略已存在
+            conn.execute("INSERT OR IGNORE INTO search_hierarchy (parent_id, child_id) VALUES (?, ?)", 
+                        (parent_id, child_id))
+        return write_func
+    
+    @staticmethod
+    def remove_hierarchy(parent_id, child_id):
+        """删除父子关系"""
+        def write_func(conn):
+            conn.execute("DELETE FROM search_hierarchy WHERE parent_id=? AND child_id=?", 
+                        (parent_id, child_id))
+        return write_func
+
+    @staticmethod
+    def remove_keyword_from_group(group_id, keyword):
+        """从指定组中删除关键词"""
+        def write_func(conn):
+            conn.execute("DELETE FROM search_keywords WHERE keyword=? AND group_id=?", 
+                        (keyword, group_id))
+        return write_func
+
+    @staticmethod
+    def try_write(base_version, client_id, write_func):
+        """核心乐观锁和冲突处理逻辑"""
+        
+        result_value = None # 用于存储 write_func 可能返回的值 (如新 ID)
+
+
+        with MemeService.get_conn() as conn:
+            conn.execute("BEGIN EXCLUSIVE TRANSACTION")
+            try:
+                meta = conn.execute("SELECT version_id FROM system_meta WHERE key='rules_state'").fetchone()
+                current_version = meta['version_id']
+
+                if current_version != base_version:
+                    # 冲突处理
+                    conflict_count_row = conn.execute(
+                        "SELECT COUNT(DISTINCT modifier_id) FROM search_version_log WHERE version_id > ?", 
+                        (base_version,)
+                    ).fetchone()
+                    
+                    latest_data = MemeService.get_rules_data(conn)
+                    
+                    return {
+                        "success": False, 
+                        "status": 409, 
+                        "error": "conflict",
+                        "latest_data": latest_data,
+                        "unique_modifiers": conflict_count_row[0]
+                    }
+                
+                # 执行写操作（write_func 必须接收 conn 参数）
+                result_value = write_func(conn)
+
+                # 更新版本号
+                new_version = current_version + 1
+                now = time.time()
+                conn.execute("UPDATE system_meta SET version_id=?, last_updated_at=? WHERE key='rules_state'", 
+                            (new_version, now))
+                conn.execute("INSERT INTO search_version_log (version_id, modifier_id, updated_at) VALUES (?, ?, ?)", 
+                            (new_version, client_id, now))
+                
+                conn.commit()
+
+                response_data = {"success": True, "version_id": new_version, "status": 200}
+            
+                if result_value is not None:
+                        # 如果 write_func 返回了值，将其添加到响应中 (例如 group/add 返回 new_id)
+                        response_data['new_id'] = result_value
+                        
+                return response_data
+
+            except Exception as e:
+                conn.rollback()
+                print(f"Transaction failed: {e}")
+                return {"success": False, "status": 500, "error": str(e)}
+
+    @staticmethod
+    def add_keyword_to_group(group_id, keyword):
+        """用于 try_write 包装的示例写操作"""
+        def write_func(conn):
+            conn.execute("INSERT OR REPLACE INTO search_keywords (keyword, group_id) VALUES (?, ?)", 
+                        (keyword, group_id))
+        return write_func        
+
+
 
     @staticmethod
     def search(params):
@@ -90,8 +250,8 @@ class MemeService:
         elif sort_by == 'date_asc': order_sql = "ORDER BY i.created_at ASC"
         elif sort_by == 'size_desc': order_sql = "ORDER BY i.size DESC"
         elif sort_by == 'size_asc': order_sql = "ORDER BY i.size ASC"
-        elif sort_by == 'resolution_desc': order_sql = "ORDER BY (i.width * i.height) DESC"
-        elif sort_by == 'resolution_asc': order_sql = "ORDER BY (i.width * i.height) ASC"
+        elif sort_by == 'resolution_desc': order_sql = "ORDER BY i.height DESC, i.width DESC"
+        elif sort_by == 'resolution_asc': order_sql = "ORDER BY i.height ASC, i.width ASC"
 
         query = f"""
             SELECT i.*, f.tags_text 
@@ -246,6 +406,156 @@ def api_update_tags():
     data = request.json
     MemeService.update_index(data['md5'], data['tags'])
     return jsonify({"success": True})
+
+@app.route('/api/rules', methods=['GET'])
+def api_get_rules():
+    """获取规则树数据并支持 ETag 缓存"""
+    with MemeService.get_conn() as conn:
+        meta = conn.execute("SELECT version_id FROM system_meta WHERE key='rules_state'").fetchone()
+        version_id = meta['version_id'] if meta else 0
+        etag = str(version_id)
+        
+        if request.headers.get('If-None-Match') == etag:
+            return '', 304
+            
+        rules_data = MemeService.get_rules_data(conn)
+        
+        response = jsonify(rules_data)
+        response.headers['ETag'] = etag
+        return response
+
+@app.route('/api/rules/keyword/add', methods=['POST'])
+def api_add_keyword():
+    data = request.json
+    base_version = data.get('base_version')
+    client_id = data.get('client_id')
+    group_id = data.get('group_id')
+    keyword = data.get('keyword')
+
+    if None in [base_version, client_id, group_id, keyword]:
+        return jsonify({"success": False, "error": "Missing parameters"}), 400
+
+    result = MemeService.try_write(
+        base_version, client_id, 
+        MemeService.add_keyword_to_group(group_id, keyword)
+    )
+
+    if result['status'] == 409:
+        return jsonify(result), 409
+    
+    return jsonify({"success": result['success'], "version_id": result.get('version_id')})
+
+@app.route('/api/rules/group/add', methods=['POST'])
+def api_add_group():
+    data = request.json
+    base_version = data.get('base_version')
+    client_id = data.get('client_id')
+    group_name = data.get('group_name')
+
+    if None in [base_version, client_id, group_name]:
+        return jsonify({"success": False, "error": "Missing parameters"}), 400
+
+    result = MemeService.try_write(
+        base_version, client_id, 
+        MemeService.add_group(group_name)
+    )
+
+    if result['status'] == 409:
+        return jsonify(result), 409
+    
+    return jsonify({"success": result['success'], "version_id": result.get('version_id'), "new_id": result.get('new_id')})
+
+@app.route('/api/rules/group/update', methods=['POST'])
+def api_update_group():
+    data = request.json
+    base_version = data.get('base_version')
+    client_id = data.get('client_id')
+    group_id = data.get('group_id')
+    group_name = data.get('group_name')
+    is_enabled = data.get('is_enabled', 1) # 默认启用
+
+    if None in [base_version, client_id, group_id, group_name]:
+        return jsonify({"success": False, "error": "Missing parameters"}), 400
+
+    result = MemeService.try_write(
+        base_version, client_id, 
+        MemeService.update_group(group_id, group_name, is_enabled)
+    )
+
+    if result['status'] == 409:
+        return jsonify(result), 409
+    
+    return jsonify({"success": result['success'], "version_id": result.get('version_id')})
+
+
+@app.route('/api/rules/keyword/remove', methods=['POST'])
+def api_remove_keyword():
+    data = request.json
+    base_version = data.get('base_version')
+    client_id = data.get('client_id')
+    group_id = data.get('group_id')
+    keyword = data.get('keyword')
+
+    if None in [base_version, client_id, group_id, keyword]:
+        return jsonify({"success": False, "error": "Missing parameters"}), 400
+
+    result = MemeService.try_write(
+        base_version, client_id, 
+        MemeService.remove_keyword_from_group(group_id, keyword)
+    )
+
+    if result['status'] == 409:
+        return jsonify(result), 409
+    
+    return jsonify({"success": result['success'], "version_id": result.get('version_id')})
+
+
+@app.route('/api/rules/hierarchy/add', methods=['POST'])
+def api_add_hierarchy():
+    data = request.json
+    base_version = data.get('base_version')
+    client_id = data.get('client_id')
+    parent_id = data.get('parent_id')
+    child_id = data.get('child_id')
+
+    if None in [base_version, client_id, parent_id, child_id]:
+        return jsonify({"success": False, "error": "Missing parameters"}), 400
+
+    result = MemeService.try_write(
+        base_version, client_id, 
+        MemeService.add_hierarchy(parent_id, child_id)
+    )
+
+    if result['status'] == 409:
+        return jsonify(result), 409
+    
+    # 捕获 write_func 中抛出的 ValueError
+    if result.get('error') == "Cannot link group to itself":
+        return jsonify({"success": False, "error": "Cannot link group to itself"}), 400
+    
+    return jsonify({"success": result['success'], "version_id": result.get('version_id')})
+
+
+@app.route('/api/rules/hierarchy/remove', methods=['POST'])
+def api_remove_hierarchy():
+    data = request.json
+    base_version = data.get('base_version')
+    client_id = data.get('client_id')
+    parent_id = data.get('parent_id')
+    child_id = data.get('child_id')
+
+    if None in [base_version, client_id, parent_id, child_id]:
+        return jsonify({"success": False, "error": "Missing parameters"}), 400
+
+    result = MemeService.try_write(
+        base_version, client_id, 
+        MemeService.remove_hierarchy(parent_id, child_id)
+    )
+
+    if result['status'] == 409:
+        return jsonify(result), 409
+    
+    return jsonify({"success": result['success'], "version_id": result.get('version_id')})
 
 @app.route('/api/meta/tags')
 def api_tags():

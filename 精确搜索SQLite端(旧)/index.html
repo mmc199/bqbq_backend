@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BQBQ 表情仓库</title>
+    <title>BQBQ 表情标签</title>
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- Lucide Icons -->
@@ -14,12 +14,25 @@
 <body class="bg-slate-50 text-slate-800 h-screen flex flex-col overflow-hidden">
 
     <!-- Header: 全宽搜索栏 -->
-    <header class="h-16 bg-white/90 backdrop-blur border-b border-slate-200 flex items-center px-4 z-30 shrink-0 gap-2 shadow-sm">
+    <header class="h-16 bg-white/90 /* REMOVED backdrop-blur */ border-b border-slate-200 flex items-center px-4 z-30 shrink-0 gap-2 shadow-sm">
         <!-- Search Container -->
         <div id="header-search-bar" class="flex-1 flex flex-wrap items-center gap-2 bg-slate-100 rounded-xl px-3 py-2 min-h-[50px] cursor-text transition-colors hover:bg-slate-50 focus-within:bg-white focus-within:ring-2 focus-within:ring-blue-100 border border-transparent focus-within:border-blue-300">
             <!-- JS will inject TagInput here -->
         </div>
     </header>
+
+    <aside id="rules-tree-panel" class="fixed top-16 left-0 h-full w-72 bg-white border-r border-slate-200 z-40 transform -translate-x-full transition-transform duration-300 flex flex-col p-4 shadow-xl">
+        <h3 class="text-lg font-bold text-slate-700 mb-4">🌳 语义森林规则</h3>
+        <div class="flex-1 overflow-y-auto custom-scrollbar">
+            <div id="rules-tree-container" class="space-y-2">
+                <p class="text-sm text-slate-400">加载中...</p>
+            </div>
+        </div>
+        <div class="mt-4 pt-3 border-t border-slate-100 text-xs text-slate-500 flex justify-between">
+            <span id="rules-version-info">V0</span>
+            <button id="rules-force-sync" class="text-blue-500 hover:text-blue-700">强制同步</button>
+        </div>
+    </aside>
 
     <!-- Main Gallery -->
     <main id="gallery-container" class="flex-1 overflow-y-auto p-4 custom-scrollbar relative bg-slate-50">
@@ -39,7 +52,12 @@
     </main>
 
     <!-- Temp Tag Panel (Hidden by default) -->
-    <div id="temp-tag-panel" class="fixed bottom-28 right-24 bg-white rounded-xl shadow-2xl border border-slate-200 p-3 z-40 hidden w-64 flex-col gap-2 transform transition-all duration-200 origin-bottom-right">
+    <!-- 
+       UPDATED: 
+       - Fixed to top (top-24) instead of bottom.
+       - Moved left (right-44) to avoid overlap with the button grid on the right.
+    -->
+    <div id="temp-tag-panel" class="fixed top-24 right-44 bg-white rounded-xl shadow-2xl border border-slate-200 p-3 z-40 hidden w-64 flex-col gap-2 transform transition-all duration-200 origin-top-right">
         <div class="text-xs font-bold text-slate-500 mb-1 flex justify-between">
             <span>临时标签 (点击图片粘贴)</span>
             <span id="close-temp-panel" class="cursor-pointer hover:text-red-500">&times;</span>
@@ -51,7 +69,12 @@
     </div>
 
     <!-- Sort Menu (Hidden by default) -->
-    <div id="sort-menu" class="fixed bottom-28 right-8 bg-white rounded-xl shadow-xl border border-slate-200 py-2 z-40 hidden flex-col w-40 origin-bottom-right">
+    <!-- 
+       UPDATED: 
+       - Fixed to top (top-24) instead of bottom.
+       - Moved left (right-44) to allow space for the button grid.
+    -->
+    <div id="sort-menu" class="fixed top-24 right-44 bg-white rounded-xl shadow-xl border border-slate-200 py-2 z-40 hidden flex-col w-40 origin-top-right">
         <button data-sort="date_desc" class="sort-option px-4 py-2 text-sm text-left hover:bg-slate-50 text-blue-600 font-bold">📅 最新添加</button>
         <button data-sort="date_asc" class="sort-option px-4 py-2 text-sm text-left hover:bg-slate-50 text-slate-600">📅 最早添加</button>
         <button data-sort="size_desc" class="sort-option px-4 py-2 text-sm text-left hover:bg-slate-50 text-slate-600">💾 文件很大</button>
@@ -61,7 +84,12 @@
     </div>
 
     <!-- Floating Action Buttons (Stack) -->
-    <div class="fixed top-1/2 -translate-y-1/2 right-8 grid grid-cols-2 gap-3 z-50">
+    <!-- 
+       UPDATED:
+       - Changed `bottom-8` to `top-24` to stick to the top section.
+       - Removed `lg:top-1/2` centering logic to keep it consistently at the top.
+    -->
+    <div class="fixed right-8 grid grid-cols-2 gap-3 z-50 top-48">
         
         <div class="w-14 h-14 pointer-events-none"></div>
         
@@ -102,15 +130,20 @@
             </button>
             
             <!-- Clear Tags Button (Satellite Top) -->
-            <button id="clear-search-btn" class="absolute -top-2 -left-2 w-8 h-8 bg-white text-slate-600 border border-slate-200 rounded-full shadow-md flex items-center justify-center hover:bg-red-50 hover:text-red-500 transition-all z-30 group-hover:opacity-100" title="清空标签">
+            <button id="clear-search-btn" class="absolute -top-2 -right-2 w-8 h-8 bg-white text-slate-600 border border-slate-200 rounded-full shadow-md flex items-center justify-center hover:bg-red-50 hover:text-red-500 transition-all z-30 group-hover:opacity-100" title="清空标签">
                 <i data-lucide="x" class="w-4 h-4"></i>
             </button>
 
             <!-- Refresh Button (Satellite Bottom) -->
-            <button id="reload-search-btn" class="absolute -bottom-2 -left-2 w-8 h-8 bg-white text-slate-600 border border-slate-200 rounded-full shadow-md flex items-center justify-center hover:bg-slate-100 hover:text-blue-600 transition-all z-30" title="刷新">
+            <button id="reload-search-btn" class="absolute -bottom-2 -right-2 w-8 h-8 bg-white text-slate-600 border border-slate-200 rounded-full shadow-md flex items-center justify-center hover:bg-slate-100 hover:text-blue-600 transition-all z-30" title="刷新">
                 <i data-lucide="refresh-cw" class="w-4 h-4"></i>
             </button>
         </div>
+
+        <button id="fab-tree" class="w-14 h-14 bg-white hover:bg-green-50 text-green-600 border border-green-200 rounded-2xl shadow-lg hover:shadow-xl hover:scale-105 transition-all flex items-center justify-center relative group" title="树状图">
+            <i data-lucide="tree-pine" class="w-6 h-6"></i>
+        </button>
+
     </div>
 
     <!-- Datalist for Autocomplete -->
