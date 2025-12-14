@@ -97,9 +97,95 @@ border: 1px solid rgba(255, 255, 255, 0.1);
 text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.8), /* 柔和的双层阴影 */
             -1px -1px 2px rgba(0, 0, 0, 0.8);
 
-overflow-wrap: break-all; 
-max-width: 100%; 
-display: block; 
+overflow-wrap: break-all;
+max-width: 100%;
+display: block;
 
 
+}
+
+/* ========== 拖拽放置区样式 ========== */
+
+/* 节点间隙放置区：正常状态（收起） */
+.drop-gap {
+    height: 4px;
+    margin: 2px 0;
+    border-radius: 4px;
+    background-color: transparent;
+    transition: all 0.15s ease-out;
+    position: relative;
+}
+
+/* 节点间隙放置区：拖拽悬停时展开 */
+.drop-gap.drag-over {
+    height: 24px;
+    background-color: #dbeafe;
+    border: 2px dashed #3b82f6;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.drop-gap.drag-over::after {
+    content: "放置到此处";
+    font-size: 10px;
+    color: #3b82f6;
+    font-weight: bold;
+}
+
+/* 根目录放置区 */
+.root-drop-zone {
+    min-height: 32px;
+    margin-bottom: 8px;
+    border-radius: 8px;
+    border: 2px dashed #d1d5db;
+    background-color: #f9fafb;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.15s ease-out;
+    cursor: pointer;
+}
+
+.root-drop-zone:hover {
+    border-color: #9ca3af;
+    background-color: #f3f4f6;
+}
+
+.root-drop-zone.drag-over {
+    min-height: 48px;
+    border-color: #10b981;
+    background-color: #d1fae5;
+    border-style: solid;
+}
+
+.root-drop-zone .zone-label {
+    font-size: 11px;
+    color: #9ca3af;
+    font-weight: 500;
+    pointer-events: none;
+}
+
+.root-drop-zone.drag-over .zone-label {
+    color: #059669;
+    font-weight: bold;
+}
+
+/* 拖拽中的组节点样式 */
+.group-node.dragging {
+    opacity: 0.4;
+    border: 2px dashed #94a3b8 !important;
+    background-color: #f1f5f9;
+}
+
+/* 作为嵌套目标时的组节点样式 */
+.group-node.drop-target-child {
+    background-color: #eff6ff;
+    box-shadow: inset 0 0 0 2px #3b82f6;
+    border-radius: 8px;
+}
+
+/* 拖拽时禁止文本选择 */
+.is-dragging * {
+    user-select: none !important;
 }

@@ -129,30 +129,50 @@ class TagInput {
 
     addTag(text) {
         let isExclude = false;
+        let isSynonym = false;
+        let synonymWords = [];
+
+        // 检查是否是排除标签
         if (this.enableExcludes && text.startsWith('-') && text.length > 1) {
             isExclude = true;
             text = text.substring(1);
         }
 
-        // Avoid duplicates (taking exclude status into account for search)
+        // 检查是否包含逗号（中文或英文），如果有则为同义词组
+        // 注意：排除标签也可以是同义词组（如 -猫,喵,cat 表示排除这组同义词中的任意一个）
+        if (text.includes(',') || text.includes('，')) {
+            // 分割并清理每个词
+            synonymWords = text.split(/[,，]/).map(w => w.trim()).filter(w => w.length > 0);
+            if (synonymWords.length > 1) {
+                isSynonym = true;
+                text = synonymWords.join(', '); // 规范化显示格式
+            } else if (synonymWords.length === 1) {
+                text = synonymWords[0]; // 只有一个词，不算同义词组
+            }
+        }
+
+        // Avoid duplicates (taking exclude and synonym status into account for search)
         const exists = this.tags.some(t => {
             const tText = typeof t === 'string' ? t : t.text;
             const tExclude = typeof t === 'string' ? false : t.exclude;
-            return tText === text && tExclude === isExclude;
+            const tSynonym = typeof t === 'string' ? false : t.synonym;
+            return tText === text && tExclude === isExclude && tSynonym === isSynonym;
         });
 
         if (!exists) {
-            const newTag = this.enableExcludes ? { text, exclude: isExclude } : text;
+            const newTag = this.enableExcludes
+                ? { text, exclude: isExclude, synonym: isSynonym, synonymWords: isSynonym ? synonymWords : null }
+                : text;
             this.tags.push(newTag);
             this.onChange(this.tags);
             this.render();
 
             // --- 修改开始: 添加这一行 ---
-            this.input.focus(); 
+            this.input.focus();
             // --- 修改结束 ---
 
         }
-        
+
         // Scroll to keep input in view
         this.input.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
@@ -184,29 +204,36 @@ class TagInput {
         this.input.focus();
     }
 
-    getStyle(isExclude) {
+    getStyle(isExclude, isSynonym = false) {
         if (isExclude) return 'bg-red-100 text-red-600 border border-red-200 hover:bg-red-200';
+        if (isSynonym) return 'bg-green-100 text-green-600 border border-green-200 hover:bg-green-200';
         if (this.theme === 'purple') return 'bg-purple-100 text-purple-700 border border-purple-200 hover:bg-purple-200';
         return 'bg-blue-100 text-blue-600 border border-blue-200 hover:bg-blue-200';
     }
 
     render() {
-        // Clear container but keep input if possible, or just rebuild. 
+        // Clear container but keep input if possible, or just rebuild.
         // Rebuilding is safer for order.
         this.container.innerHTML = '';
 
         this.tags.forEach((tag, idx) => {
             const text = this.enableExcludes ? tag.text : tag;
             const isExclude = this.enableExcludes ? tag.exclude : false;
+            const isSynonym = this.enableExcludes ? (tag.synonym || false) : false;
 
             const capsule = document.createElement('div');
-            capsule.className = `tag-capsule flex items-center gap-1 px-3 py-1 rounded-full text-sm font-bold cursor-pointer select-none whitespace-nowrap transition-transform active:scale-95 ${this.getStyle(isExclude)} 
+            capsule.className = `tag-capsule flex items-center gap-1 px-3 py-1 rounded-full text-sm font-bold cursor-pointer select-none whitespace-nowrap transition-transform active:scale-95 ${this.getStyle(isExclude, isSynonym)}
                                  max-w-full break-all`;
-            capsule.classList.remove('whitespace-nowrap');       
+            capsule.classList.remove('whitespace-nowrap');
 
             // Text Part (Click to Edit)
             const spanText = document.createElement('span');
+            // 同义词组显示：排除用-前缀，同义词组用逗号分隔显示
             spanText.textContent = (isExclude ? '-' : '') + text;
+            // 为同义词组添加 title 提示
+            if (isSynonym) {
+                capsule.title = `同义词组: ${tag.synonymWords.join(' | ')}`;
+            }
             spanText.onclick = (e) => {
                 e.stopPropagation();
                 this.editTag(idx);
@@ -289,6 +316,9 @@ class GlobalState {
         // --- 新增：批量编辑状态 ---
         this.batchEditMode = false; // 是否处于批量编辑模式
         this.selectedGroupIds = new Set(); // 存储已选中的组ID
+
+        // --- 新增：规则树展开状态 ---
+        this.expandedGroupIds = new Set(); // 存储已展开的组ID
     }
 
     /**
@@ -471,7 +501,7 @@ class MemeApp {
             child.isRoot = false; // 有父节点，不是根节点
         });
 
-        // 5. 提取根节点
+        // 5. 提取根节点（冲突节点也应该正常渲染，只是标记为冲突）
         const rootNodes = [];
         const conflictNodes = [];
 
@@ -479,10 +509,13 @@ class MemeApp {
             // 清理临时标记
             delete node.isRoot;
 
-            // 分离冲突节点和正常根节点
+            // 收集冲突节点（用于底部警告区域显示）
             if (node.isConflict) {
                 conflictNodes.push(node);
-            } else if (node.parentIds.length === 0) {
+            }
+
+            // 根节点判断：没有父节点的就是根节点（包括冲突节点）
+            if (node.parentIds.length === 0) {
                 rootNodes.push(node);
             }
         });
@@ -513,9 +546,11 @@ class MemeApp {
     }
 
     /**
-     * 根据用户输入的关键词/组名，从规则树中膨胀出所有匹配的关键词。
+     * 根据用户输入的关键词/组名，从规则树中膨胀出所有匹配的同义词。
+     * - 命中组名：收集该组及其所有子组的同义词
+     * - 命中同义词：收集所在组及其所有子组的同义词（与命中组名等效）
      * @param {string} inputText - 单个用户输入的标签文本。
-     * @returns {Array<string>} 膨胀后的关键词数组（包含原始输入）。
+     * @returns {Array<string>} 膨胀后的同义词数组（包含原始输入）。
      */
     expandSingleKeyword(inputText) {
         if (!this.state.rulesTree) return [inputText];
@@ -524,11 +559,11 @@ class MemeApp {
         uniqueKeywords.add(inputText); // 始终包含原始输入
 
         /**
-         * 递归查找组及其所有子组下的关键词。
+         * 递归收集组及其所有子组下的同义词。
          * @param {Object} node - 当前组节点。
          */
         const recursivelyCollectKeywords = (node) => {
-            // 只收集启用组的启用关键词
+            // 只收集启用组的启用同义词
             if (!node.isEnabled) return;
 
             node.keywords
@@ -550,10 +585,12 @@ class MemeApp {
                     return;
                 }
 
-                // 2. 检查是否命中关键词
-                const matchedKeyword = node.keywords.find(k => k.text === inputText);
-                if (matchedKeyword && matchedKeyword.isEnabled) {
-                    uniqueKeywords.add(matchedKeyword.text);
+                // 2. 检查是否命中同义词 - 如果命中，则收集所在组及其所有子组的同义词
+                const matchedKeyword = node.keywords.find(k => k.text === inputText && k.isEnabled);
+                if (matchedKeyword) {
+                    // 命中同义词时，膨胀为该组及其所有子组的所有同义词
+                    recursivelyCollectKeywords(node);
+                    return; // 找到匹配后不再继续检查此节点的子节点（避免重复）
                 }
 
                 // 3. 递归检查子节点
@@ -568,8 +605,9 @@ class MemeApp {
 
     /**
      * 批量膨胀多个标签，返回二维数组格式。
+     * 每个输入标签膨胀后的同义词组作为一个并集（组内OR），不同组之间做交集（组间AND）。
      * @param {Array<string>} inputs - 用户输入的标签数组。
-     * @returns {Array<Array<string>>} 二维数组，每个子数组是一个标签膨胀后的关键词列表。
+     * @returns {Array<Array<string>>} 二维数组，每个子数组是一个标签膨胀后的同义词列表。
      */
     expandKeywordsToGroups(inputs) {
         return inputs.map(input => this.expandSingleKeyword(input));
@@ -901,17 +939,6 @@ class MemeApp {
             }
         });
 
-        const hideAllChildren = () => {
-            this.dom.rulesTreeContainer.querySelectorAll('.flex.flex-wrap.gap-1, .ml-4.border-l').forEach(el => {
-                el.classList.add('hidden');
-            });
-        };
-        // 首次加载规则树后执行隐藏
-        this.dom.fabTree.addEventListener('click', hideAllChildren, { once: true });
-
-
-
-
         // --- Temp Panel Logic ---
         document.getElementById('close-temp-panel').onclick = () => this.dom.fabTemp.click();
         document.getElementById('clear-temp-tags').onclick = () => {
@@ -1236,30 +1263,61 @@ class MemeApp {
         this.state.loading = true;
         this.dom.loader.classList.remove('hidden');
 
-        // 分离包含和排除标签
-        const rawIncludes = this.state.queryTags.filter(t => !t.exclude).map(t => t.text);
-        const rawExcludes = this.state.queryTags.filter(t => t.exclude).map(t => t.text);
+        // 分离三种类型的标签：
+        // 1. 普通包含标签（非排除、非同义词组）- 需要通过规则树膨胀
+        // 2. 同义词组包含标签（非排除、是同义词组）- 每个词经过规则树膨胀后合并为一个OR组
+        // 3. 普通排除标签（排除、非同义词组）- 需要通过规则树膨胀
+        // 4. 同义词组排除标签（排除、是同义词组）- 每个词经过规则树膨胀后合并为一个OR组
 
-        // 膨胀包含标签（返回二维数组：每个标签膨胀后的关键词组）
-        const expandedIncludesGroups = this.expandKeywordsToGroups(rawIncludes);
+        const normalIncludes = this.state.queryTags.filter(t => !t.exclude && !t.synonym).map(t => t.text);
+        const synonymIncludes = this.state.queryTags.filter(t => !t.exclude && t.synonym);
+        const normalExcludes = this.state.queryTags.filter(t => t.exclude && !t.synonym).map(t => t.text);
+        const synonymExcludes = this.state.queryTags.filter(t => t.exclude && t.synonym);
 
-        // 膨胀排除标签（同样返回二维数组）
-        const expandedExcludesGroups = this.expandKeywordsToGroups(rawExcludes);
+        // 膨胀普通包含标签（返回二维数组：每个标签膨胀后的同义词组）
+        const expandedNormalIncludes = this.expandKeywordsToGroups(normalIncludes);
+
+        // 同义词组包含标签：每个词经过规则树膨胀，然后将所有结果合并为一个OR组
+        const synonymIncludeGroups = synonymIncludes.map(t => {
+            // 对同义词组中的每个词进行膨胀
+            const expandedWords = t.synonymWords.flatMap(word => this.expandSingleKeyword(word));
+            // 去重后返回为一个OR组
+            return [...new Set(expandedWords)];
+        });
+
+        // 合并包含标签：普通膨胀结果 + 同义词组
+        const expandedIncludesGroups = [...expandedNormalIncludes, ...synonymIncludeGroups];
+
+        // 膨胀普通排除标签
+        const expandedNormalExcludes = this.expandKeywordsToGroups(normalExcludes);
+
+        // 同义词组排除标签：每个词经过规则树膨胀，然后将所有结果合并为一个OR组
+        const synonymExcludeGroups = synonymExcludes.map(t => {
+            // 对同义词组中的每个词进行膨胀
+            const expandedWords = t.synonymWords.flatMap(word => this.expandSingleKeyword(word));
+            // 去重后返回为一个OR组
+            return [...new Set(expandedWords)];
+        });
+
+        // 合并排除标签：普通膨胀结果 + 同义词组
+        const expandedExcludesGroups = [...expandedNormalExcludes, ...synonymExcludeGroups];
 
         // 计算膨胀后的总关键词数（用于用户反馈）
         const totalExpandedIncludes = expandedIncludesGroups.reduce((sum, g) => sum + g.length, 0);
         const totalExpandedExcludes = expandedExcludesGroups.reduce((sum, g) => sum + g.length, 0);
+        const totalOriginalIncludes = normalIncludes.length + synonymIncludes.length;
+        const totalOriginalExcludes = normalExcludes.length + synonymExcludes.length;
 
         // 用户反馈：显示膨胀信息
-        if (rawIncludes.length > 0 && totalExpandedIncludes > rawIncludes.length) {
-            console.log(`[关键词膨胀] 包含: ${rawIncludes.join(', ')} → ${totalExpandedIncludes} 个关键词`);
-            this.showExpandedKeywordsBadge(rawIncludes.length, totalExpandedIncludes);
+        if (totalOriginalIncludes > 0 && totalExpandedIncludes > totalOriginalIncludes) {
+            console.log(`[关键词膨胀] 包含: ${totalOriginalIncludes} 个标签 → ${totalExpandedIncludes} 个关键词`);
+            this.showExpandedKeywordsBadge(totalOriginalIncludes, totalExpandedIncludes);
         } else {
             this.hideExpandedKeywordsBadge();
         }
 
-        if (rawExcludes.length > 0 && totalExpandedExcludes > rawExcludes.length) {
-            console.log(`[关键词膨胀] 排除: ${rawExcludes.join(', ')} → ${totalExpandedExcludes} 个关键词`);
+        if (totalOriginalExcludes > 0 && totalExpandedExcludes > totalOriginalExcludes) {
+            console.log(`[关键词膨胀] 排除: ${totalOriginalExcludes} 个标签 → ${totalExpandedExcludes} 个关键词`);
         }
 
         const payload = {
@@ -1428,6 +1486,10 @@ class MemeApp {
 
         container.innerHTML = '';
 
+        // [新增] 在顶部添加根目录放置区
+        const rootDropZone = this.createRootDropZone();
+        container.appendChild(rootDropZone);
+
         // [新增] 始终在顶部添加"添加新组"按钮
         const addRootButton = document.createElement('button');
         addRootButton.id = 'add-root-group-btn';
@@ -1450,17 +1512,29 @@ class MemeApp {
 
         /**
          * 递归渲染节点
+         * @param {Array} nodes - 要渲染的节点数组
+         * @param {HTMLElement} parentEl - 父容器元素
+         * @param {number} parentId - 父节点ID（0表示根级别）
          */
         const isBatchMode = this.state.batchEditMode;
         const selectedIds = this.state.selectedGroupIds;
+        const expandedIds = this.state.expandedGroupIds;
 
-        const renderRecursive = (nodes, parentEl) => {
-            nodes.forEach(node => {
+        const renderRecursive = (nodes, parentEl, parentId = 0) => {
+            nodes.forEach((node) => {
+                // [新增] 在每个节点前添加间隙放置区
+                const dropGap = this.createDropGap(node.id, parentId);
+                parentEl.appendChild(dropGap);
+
                 const isEnabled = node.isEnabled || (node.isEnabled === undefined ? true : false);
                 const isSelected = selectedIds.has(node.id);
+                const isConflict = node.isConflict || false; // 检测是否是冲突节点
+                const isExpanded = expandedIds.has(node.id); // 检查是否已展开
 
                 const groupEl = document.createElement('div');
-                groupEl.className = `group-node group relative ${isEnabled ? '' : 'opacity-50 italic'} ${node.isMatch ? 'bg-blue-50 border-blue-400' : ''}`;
+                // 冲突节点添加红色边框和背景
+                const conflictClass = isConflict ? 'border-2 border-red-400 bg-red-50' : '';
+                groupEl.className = `group-node group relative ${isEnabled ? '' : 'opacity-50 italic'} ${node.isMatch ? 'bg-blue-50 border-blue-400' : ''} ${conflictClass}`;
                 groupEl.dataset.id = node.id;
                 groupEl.dataset.name = node.name || '';  // 处理空名组
 
@@ -1469,7 +1543,7 @@ class MemeApp {
                 this.bindDragEvents(groupEl);
 
                 const header = document.createElement('div');
-                header.className = `group-header flex items-center justify-between p-2 rounded cursor-pointer ${node.isMatch ? 'hover:bg-blue-100' : 'hover:bg-slate-100'}`;
+                header.className = `group-header flex items-center justify-between p-2 rounded cursor-pointer ${node.isMatch ? 'hover:bg-blue-100' : (isConflict ? 'hover:bg-red-100' : 'hover:bg-slate-100')}`;
 
                 const nameDisplay = document.createElement('div');
                 nameDisplay.className = "flex items-center gap-1 font-bold text-sm";
@@ -1480,19 +1554,26 @@ class MemeApp {
                            data-group-id="${node.id}" ${isSelected ? 'checked' : ''} />
                 ` : '';
 
-                // 处理空名组：特殊样式标识
+                // 处理空名组和冲突节点：特殊样式标识
                 const isEmptyNameGroup = !node.name || node.name.trim() === '';
-                const displayName = isEmptyNameGroup
-                    ? `<span class="text-red-500 bg-red-50 px-1 rounded">[空名组 #${node.id}]</span>`
-                    : `<span class="group-name-text ${node.isMatch ? 'text-blue-700' : 'text-slate-700'}">${node.name}</span>`;
+                let displayName;
+                if (isConflict) {
+                    // 冲突节点显示红色警告
+                    displayName = `<span class="text-red-600">${node.name || '[空名组]'}</span>
+                                   <span class="text-xs text-red-500 bg-red-100 px-1 rounded ml-1" title="${node.conflictReason || '循环依赖'}">⚠️冲突</span>`;
+                } else if (isEmptyNameGroup) {
+                    displayName = `<span class="text-red-500 bg-red-50 px-1 rounded">[空名组 #${node.id}]</span>`;
+                } else {
+                    displayName = `<span class="group-name-text ${node.isMatch ? 'text-blue-700' : 'text-slate-700'}">${node.name}</span>`;
+                }
 
-                // 空名组使用警告图标
-                const folderIcon = isEmptyNameGroup
+                // 图标选择：冲突节点用警告图标
+                const folderIcon = isConflict
                     ? 'alert-triangle'
-                    : (isEnabled ? 'folder' : 'folder-x');
-                const iconColor = isEmptyNameGroup
+                    : (isEmptyNameGroup ? 'alert-triangle' : (isEnabled ? 'folder' : 'folder-x'));
+                const iconColor = isConflict
                     ? 'text-red-500'
-                    : (node.isMatch ? 'text-blue-600' : 'text-slate-500');
+                    : (isEmptyNameGroup ? 'text-red-500' : (node.isMatch ? 'text-blue-600' : 'text-slate-500'));
 
                 nameDisplay.innerHTML = `
                     ${checkboxHtml}
@@ -1505,7 +1586,7 @@ class MemeApp {
 
                 const chevron = document.createElement('i');
                 chevron.dataset.lucide = "chevron-down";
-                chevron.className = "w-4 h-4 text-slate-400 transition transform";
+                chevron.className = `w-4 h-4 text-slate-400 transition transform ${isExpanded ? 'rotate-180' : ''}`;
 
                 // 批量编辑模式下隐藏单个操作按钮，只显示 chevron
                 if (!isBatchMode) {
@@ -1519,11 +1600,11 @@ class MemeApp {
                         this.startChildGroupAdd(node.id, keywordsContainer, childrenContainer);
                     };
 
-                    // 添加关键词按钮
+                    // 添加同义词按钮
                     const addKeywordBtn = document.createElement('button');
                     addKeywordBtn.className = "p-1 text-green-500 hover:text-green-700 opacity-0 group-hover:opacity-100 transition-opacity";
                     addKeywordBtn.innerHTML = `<i data-lucide="plus" class="w-4 h-4"></i>`;
-                    addKeywordBtn.title = "添加关键词";
+                    addKeywordBtn.title = "添加同义词";
                     addKeywordBtn.onclick = (e) => {
                         e.stopPropagation();
                         this.startKeywordAdd(node.id, keywordsContainer);
@@ -1561,24 +1642,25 @@ class MemeApp {
                 header.appendChild(actionButtons);
 
                 header.onclick = (e) => {
+                    // 如果点击的是复选框，不阻止冒泡，让事件委托处理
+                    if (e.target.classList.contains('batch-checkbox')) {
+                        // 不调用 stopPropagation，让事件冒泡到 rulesTreeContainer 的事件委托
+                        return;
+                    }
+
                     e.stopPropagation();
 
-                    // 如果点击的是复选框，则不在这里处理（由事件委托处理）
-                    if (e.target.classList.contains('batch-checkbox')) {
-                        return;
-                    }
-
-                    // 批量编辑模式下，点击复选框区域切换选中状态（但不影响展开/折叠）
-                    // 复选框点击由上面处理，这里处理点击组名文字的情况
-                    if (isBatchMode && e.target.closest('.group-name-text')) {
-                        this.toggleGroupSelection(node.id);
-                        return;
-                    }
-
-                    // 展开/折叠（批量模式和正常模式都可以）
+                    // 展开/折叠（批量模式和正常模式都可以，选中状态只通过复选框控制）
                     keywordsContainer.classList.toggle('hidden');
                     childrenContainer.classList.toggle('hidden');
                     chevron.classList.toggle('rotate-180');
+
+                    // 更新展开状态存储
+                    if (expandedIds.has(node.id)) {
+                        expandedIds.delete(node.id);
+                    } else {
+                        expandedIds.add(node.id);
+                    }
                 };
 
                 header.ondblclick = (e) => {
@@ -1589,7 +1671,7 @@ class MemeApp {
                 };
 
                 const keywordsContainer = document.createElement('div');
-                keywordsContainer.className = "flex flex-wrap gap-1 pl-6 pt-1 pb-2 border-l border-slate-200 ml-2 hidden";
+                keywordsContainer.className = `flex flex-wrap gap-1 pl-6 pt-1 pb-2 border-l border-slate-200 ml-2 ${isExpanded ? '' : 'hidden'}`;
 
                 node.keywords.forEach(k => {
                     const isKeywordMatch = searchInputTexts.some(tag => k.text.toLowerCase().includes(tag.toLowerCase()));
@@ -1613,33 +1695,35 @@ class MemeApp {
                     keywordsContainer.appendChild(keywordEl);
                 });
 
-                const dropZoneIndicator = document.createElement('div');
-                dropZoneIndicator.className = "drop-indicator absolute inset-0 rounded-md border-2 border-transparent pointer-events-none transition-all duration-150";
-                groupEl.appendChild(dropZoneIndicator);
-
                 const childrenContainer = document.createElement('div');
-                childrenContainer.className = "ml-4 border-l border-slate-200 hidden";
-                renderRecursive(node.children, childrenContainer);
+                childrenContainer.className = `ml-4 border-l border-slate-200 ${isExpanded ? '' : 'hidden'}`;
+                // [修改] 递归渲染子节点时传递当前节点ID作为父ID
+                renderRecursive(node.children, childrenContainer, node.id);
 
                 groupEl.appendChild(header);
                 groupEl.appendChild(keywordsContainer);
                 groupEl.appendChild(childrenContainer);
                 parentEl.appendChild(groupEl);
             });
+
+            // [新增] 在所有节点渲染完成后，添加最后一个间隙放置区
+            if (nodes.length > 0) {
+                const lastDropGap = this.createDropGap(null, parentId);
+                parentEl.appendChild(lastDropGap);
+            }
         };
 
         // 只有有数据时才调用渲染
         if (hasTreeData) {
-            renderRecursive(treeToRender, container);
+            renderRecursive(treeToRender, container, 0);
         }
 
         // ========== 渲染冲突节点区域 ==========
         const conflictNodes = this.state.conflictNodes || [];
         const conflictRelations = this.state.conflictRelations || [];
 
-        console.log('[renderRulesTree] 冲突检测:', { conflictNodes: conflictNodes.length, conflictRelations: conflictRelations.length });
-
         if (conflictNodes.length > 0 || conflictRelations.length > 0) {
+            console.log('[renderRulesTree] 冲突检测:', { conflictNodes: conflictNodes.length, conflictRelations: conflictRelations.length });
             // 首次发现冲突时弹出 Toast 提醒用户
             if (!this._hasShownConflictWarning) {
                 this._hasShownConflictWarning = true;
@@ -1747,7 +1831,6 @@ class MemeApp {
         }
 
         lucide.createIcons();
-        this.bindDragEvents(container, true);
 
         // 只在非跳过模式时更新建议（避免循环调用）
         if (!skipSuggestionUpdate) {
@@ -1812,7 +1895,7 @@ class MemeApp {
         this.showToast(`已删除 ${relationsToRemove.length} 条父关系，节点已移到根目录`, 'success');
     }
 
-    // [新增方法] 绑定拖拽事件
+    // [重构] 绑定拖拽事件 - 支持间隙放置和嵌套放置
     bindDragEvents(el, isRootContainer = false) {
         if (!el.dataset.id && !isRootContainer) return;
 
@@ -1841,93 +1924,183 @@ class MemeApp {
             e.dataTransfer.setData('text/plain', JSON.stringify(dragIds));
             e.dataTransfer.effectAllowed = 'move';
 
-            // 拖拽时添加一个视觉反馈类
-            el.classList.add('opacity-40', 'border-dashed');
+            // 添加拖拽中样式
+            el.classList.add('dragging');
+            document.body.classList.add('is-dragging');
 
             // 批量模式下给所有选中的组添加视觉反馈
             if (this.state.batchEditMode && dragIds.length > 1) {
                 dragIds.forEach(id => {
                     const groupEl = document.querySelector(`.group-node[data-id="${id}"]`);
                     if (groupEl && groupEl !== el) {
-                        groupEl.classList.add('opacity-40', 'border-dashed');
+                        groupEl.classList.add('dragging');
                     }
                 });
             }
         });
 
         el.addEventListener('dragend', (e) => {
-            // 拖拽结束时移除反馈类
+            // 拖拽结束时移除所有反馈类
             e.stopPropagation();
-            el.classList.remove('opacity-40', 'border-dashed');
+            el.classList.remove('dragging');
+            document.body.classList.remove('is-dragging');
 
             // 移除所有组的拖拽视觉反馈
-            document.querySelectorAll('.group-node.opacity-40').forEach(node => {
-                node.classList.remove('opacity-40', 'border-dashed');
+            document.querySelectorAll('.group-node.dragging').forEach(node => {
+                node.classList.remove('dragging');
+            });
+
+            // 清除所有间隙和放置区的高亮
+            document.querySelectorAll('.drop-gap.drag-over').forEach(gap => {
+                gap.classList.remove('drag-over');
+            });
+            document.querySelectorAll('.root-drop-zone.drag-over').forEach(zone => {
+                zone.classList.remove('drag-over');
+            });
+            document.querySelectorAll('.group-node.drop-target-child').forEach(node => {
+                node.classList.remove('drop-target-child');
             });
         });
 
-        el.addEventListener('dragover', (e) => {
-            e.preventDefault(); // 允许放置
-            e.dataTransfer.dropEffect = 'move';
+        // 对于组节点，添加"作为子节点"的放置处理
+        if (!isRootContainer && el.classList.contains('group-node')) {
+            el.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                e.dataTransfer.dropEffect = 'move';
 
-            // 添加拖拽目标视觉反馈
-            const indicator = el.querySelector('.drop-indicator');
-            if (indicator) {
-                indicator.classList.remove('border-transparent');
-                indicator.classList.add('border-blue-500');
-            } else if (isRootContainer) {
-                 // 根容器的视觉反馈 (例如在Rules Tree Panel上显示)
-                 el.style.backgroundColor = 'rgba(0, 0, 255, 0.05)';
+                // 如果是拖到组节点上（而非间隙），显示嵌套放置视觉
+                el.classList.add('drop-target-child');
+            });
+
+            el.addEventListener('dragleave', (e) => {
+                // 只有当真正离开组节点时才移除样式
+                // 使用 relatedTarget 判断是否移动到子元素
+                if (!el.contains(e.relatedTarget)) {
+                    el.classList.remove('drop-target-child');
+                }
+            });
+
+            el.addEventListener('drop', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+
+                el.classList.remove('drop-target-child');
+
+                let childIds = this._parseDragData(e);
+                const parentId = parseInt(el.dataset.id);
+
+                // 过滤掉无效的ID和自身
+                childIds = childIds.filter(id => id && id !== parentId);
+
+                if (childIds.length > 0) {
+                    this.handleBatchHierarchyChange(parentId, childIds);
+                } else {
+                    this.showToast('无法将组拖拽到自身。', 'error');
+                }
+            });
+        }
+    }
+
+    /**
+     * [新增] 解析拖拽传输的数据
+     * @param {DragEvent} e - 拖拽事件
+     * @returns {number[]} 被拖拽的组ID数组
+     */
+    _parseDragData(e) {
+        let childIds = [];
+        try {
+            const data = e.dataTransfer.getData('text/plain');
+            childIds = JSON.parse(data);
+            if (!Array.isArray(childIds)) {
+                childIds = [parseInt(data)];
             }
-        });
+        } catch {
+            childIds = [parseInt(e.dataTransfer.getData('text/plain'))];
+        }
+        return childIds.filter(id => !isNaN(id));
+    }
 
-        el.addEventListener('dragleave', (e) => {
-            e.stopPropagation();
-            // 移除拖拽目标视觉反馈
-            const indicator = el.querySelector('.drop-indicator');
-            if (indicator) {
-                indicator.classList.add('border-transparent');
-                indicator.classList.remove('border-blue-500');
-            } else if (isRootContainer) {
-                el.style.backgroundColor = '';
-            }
-        });
+    /**
+     * [新增] 创建间隙放置区元素
+     * @param {number|null} siblingId - 放置后成为哪个节点的下一个兄弟节点（null表示放在最前面）
+     * @param {number} parentId - 父节点ID（0表示根级别）
+     * @returns {HTMLElement} 间隙放置区元素
+     */
+    createDropGap(siblingId, parentId) {
+        const gap = document.createElement('div');
+        gap.className = 'drop-gap';
+        gap.dataset.siblingId = siblingId || '';
+        gap.dataset.parentId = parentId;
 
-        el.addEventListener('drop', (e) => {
+        gap.addEventListener('dragover', (e) => {
             e.preventDefault();
             e.stopPropagation();
+            e.dataTransfer.dropEffect = 'move';
+            gap.classList.add('drag-over');
+        });
 
-            let childIds = [];
-            try {
-                const data = e.dataTransfer.getData('text/plain');
-                childIds = JSON.parse(data);
-                if (!Array.isArray(childIds)) {
-                    childIds = [parseInt(data)];
-                }
-            } catch {
-                childIds = [parseInt(e.dataTransfer.getData('text/plain'))];
-            }
+        gap.addEventListener('dragleave', (e) => {
+            e.stopPropagation();
+            gap.classList.remove('drag-over');
+        });
 
-            const parentId = isRootContainer ? 0 : parseInt(el.dataset.id); // 0 代表根节点
+        gap.addEventListener('drop', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            gap.classList.remove('drag-over');
 
-            // 移除拖拽目标视觉反馈
-            const indicator = el.querySelector('.drop-indicator');
-            if (indicator) {
-                indicator.classList.add('border-transparent');
-                indicator.classList.remove('border-blue-500');
-            } else if (isRootContainer) {
-                el.style.backgroundColor = '';
-            }
+            const childIds = this._parseDragData(e);
+            const targetParentId = parseInt(gap.dataset.parentId) || 0;
 
-            // 过滤掉无效的ID和自身
-            childIds = childIds.filter(id => id && id !== parentId);
+            // 过滤掉无效的ID
+            const validChildIds = childIds.filter(id => id && id !== targetParentId);
 
-            if (childIds.length > 0) {
-                this.handleBatchHierarchyChange(parentId, childIds);
-            } else {
-                this.showToast('无法将组拖拽到自身。', 'error');
+            if (validChildIds.length > 0) {
+                // 调用移动到指定父节点的方法
+                this.handleBatchHierarchyChange(targetParentId, validChildIds);
             }
         });
+
+        return gap;
+    }
+
+    /**
+     * [新增] 创建根目录放置区
+     * @returns {HTMLElement} 根目录放置区元素
+     */
+    createRootDropZone() {
+        const zone = document.createElement('div');
+        zone.className = 'root-drop-zone';
+        zone.innerHTML = '<span class="zone-label">📁 拖拽至此移至根目录</span>';
+
+        zone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            e.dataTransfer.dropEffect = 'move';
+            zone.classList.add('drag-over');
+        });
+
+        zone.addEventListener('dragleave', (e) => {
+            e.stopPropagation();
+            zone.classList.remove('drag-over');
+        });
+
+        zone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            zone.classList.remove('drag-over');
+
+            const childIds = this._parseDragData(e);
+            const validChildIds = childIds.filter(id => id);
+
+            if (validChildIds.length > 0) {
+                // 移动到根目录（parentId = 0）
+                this.handleBatchHierarchyChange(0, validChildIds);
+            }
+        });
+
+        return zone;
     }
 
     /**
