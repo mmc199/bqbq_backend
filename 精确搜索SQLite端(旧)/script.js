@@ -252,32 +252,43 @@ class GlobalState {
         // 首次加载生成随机 ID 存入 LocalStorage
         this.clientId = this.getOrGenerateClientId();
         // 从 LocalStorage 读取当前本地规则版本号
-        this.rulesBaseVersion = parseInt(localStorage.getItem(RULES_VERSION_KEY) || '0'); 
+        this.rulesBaseVersion = parseInt(localStorage.getItem(RULES_VERSION_KEY) || '0');
         // 存储从后端加载并解析后的语义森林规则树结构
-        this.rulesTree = null; 
-        
+        this.rulesTree = null;
+        // 存储冲突节点（循环依赖等问题）
+        this.conflictNodes = [];
+        this.conflictRelations = [];
+
+        // --- 1.1 新增：防抖控制 ---
+        this.pendingRulesRender = null; // 用于存储待执行的渲染函数
+        this.rulesRenderDebounceMs = 300; // 防抖延迟(毫秒)
+
         // --- 2. 原有：图片搜索与数据加载状态 (MemeApp State) ---
         this.offset = 0;
         this.limit = 40;
         this.loading = false;
         this.hasMore = true;
         this.totalItems = 0;
-        
+
         // Search State
-        this.queryTags = []; 
+        this.queryTags = [];
         this.isTrashMode = false;
-        
+
         // Tag Data (用于 Datalist 建议)
-        this.allKnownTags = []; 
-        
+        this.allKnownTags = [];
+
         // Settings
         const savedHQ = localStorage.getItem('bqbq_prefer_hq');
         this.sortBy = 'date_desc';
         this.preferHQ = savedHQ === 'true';
-        
+
         // Temp Panel State (用于临时标签粘贴)
         this.tempTags = [];
         this.isTempTagMode = false; // 新增：用于控制临时标签面板的开关状态
+
+        // --- 新增：批量编辑状态 ---
+        this.batchEditMode = false; // 是否处于批量编辑模式
+        this.selectedGroupIds = new Set(); // 存储已选中的组ID
     }
 
     /**
@@ -353,61 +364,6 @@ class MemeApp {
         this.loadMore();
     }
 
-    async loadRulesTree(forceRefresh = false) {
-    // 1. 检查本地存储中的版本号
-        const localVersion = this.state.rulesBaseVersion;
-        
-        // 修复：将 headers 定义移入 try 块之前，确保其作用域覆盖整个函数
-        const headers = {
-            // 传递 ETag (版本号)
-            'If-None-Match': localVersion.toString() 
-        };
-        
-        if (forceRefresh) {
-            // 如果是强制刷新（如冲突后），移除缓存头
-            delete headers['If-None-Match'];
-        }
-
-        try {
-            // BUG: ReferenceError: headers is not defined
-            // 修复：headers 变量已在 try 块之前定义
-            const res = await fetch('/api/rules', { headers });
-
-            if (res.status === 304) {
-                console.log(`Rules synchronized: Version ${localVersion} is current.`);
-                this.renderRulesTree(); // 规则未变，但刷新版本号和 UI
-                // 304 Not Modified: 规则未变，无需操作
-                return;
-            }
-
-            if (res.ok) {
-                const data = await res.json();
-                
-                // 2. 更新版本号和规则数据
-                this.state.rulesBaseVersion = data.version_id;
-                localStorage.setItem(RULES_VERSION_KEY, data.version_id.toString());
-                
-                // 3. 构建树结构（假设有 buildTree 函数）
-                this.state.rulesTree = this.buildTree(data); 
-                
-                // 4. 更新图片标签建议（与现有 loadMeta 逻辑分离，但可能需要更新）
-                // 暂时使用所有关键词作为图片标签建议
-                this.state.allKnownTags = data.keywords.map(k => k.keyword); 
-                this.filterAndUpdateDatalist(''); 
-                
-                // 5. 渲染侧边栏 UI
-                this.renderRulesTree(); 
-                
-                console.log(`Rules tree loaded/updated to version ${data.version_id}`);
-
-            } else {
-                console.error(`Failed to load rules: HTTP ${res.status}`);
-            }
-        } catch (e) {
-            console.error("Rules API call failed", e);
-        }
-    }
-
     /**
      * 将扁平的 groups, keywords, hierarchy 数据组装成嵌套的 Tree 对象。
      * @param {object} data - 包含 groups, keywords, hierarchy 的扁平数据对象。
@@ -417,11 +373,11 @@ class MemeApp {
     buildTree(data) {
         if (!data || !data.groups) {
             console.error("Invalid data structure for building tree:", data);
-            return [];
+            return { rootNodes: [], conflictNodes: [], conflictRelations: [] };
         }
-        
+
         const groupsMap = new Map();
-        
+
         // 1. 初始化所有组节点，并构建 Map 方便查找
         data.groups.forEach(g => {
             groupsMap.set(g.group_id, {
@@ -430,11 +386,13 @@ class MemeApp {
                 isEnabled: g.is_enabled,
                 keywords: [], // 存储关键词对象
                 children: [],
-                parentId: null, // 临时用于识别根节点
-                isRoot: true    // 临时标记
+                parentIds: [], // 改为数组，支持多父节点检测
+                isRoot: true,    // 临时标记
+                isConflict: false, // 标记冲突节点
+                conflictReason: null // 冲突原因
             });
         });
-        
+
         // 2. 分配关键词到相应的组
         data.keywords.forEach(k => {
             const groupNode = groupsMap.get(k.group_id);
@@ -446,63 +404,137 @@ class MemeApp {
             }
         });
 
-        // 3. 构建层级关系
+        // 3. 检测循环依赖的辅助函数
+        const detectCycle = (startId, targetId, visited = new Set()) => {
+            if (startId === targetId) return true;
+            if (visited.has(startId)) return false;
+            visited.add(startId);
+
+            const node = groupsMap.get(startId);
+            if (!node) return false;
+
+            for (const child of node.children) {
+                if (detectCycle(child.id, targetId, visited)) return true;
+            }
+            return false;
+        };
+
+        // 4. 构建层级关系，同时检测循环依赖
+        const conflictRelations = []; // 记录有问题的关系
+
         data.hierarchy.forEach(h => {
             const parent = groupsMap.get(h.parent_id);
             const child = groupsMap.get(h.child_id);
-            
-            if (parent && child) {
-                parent.children.push(child);
-                child.parentId = parent.id;
-                child.isRoot = false; // 有父节点，不是根节点
+
+            if (!parent || !child) {
+                // 孤儿关系：父或子节点不存在
+                conflictRelations.push({
+                    parent_id: h.parent_id,
+                    child_id: h.child_id,
+                    reason: `节点不存在: ${!parent ? 'parent_id=' + h.parent_id : ''} ${!child ? 'child_id=' + h.child_id : ''}`,
+                    type: 'orphan'
+                });
+                return;
             }
+
+            // 检测自引用
+            if (h.parent_id === h.child_id) {
+                conflictRelations.push({
+                    parent_id: h.parent_id,
+                    child_id: h.child_id,
+                    reason: `自引用: 节点 ${h.parent_id} 不能作为自己的父节点`,
+                    type: 'self_reference'
+                });
+                child.isConflict = true;
+                child.conflictReason = '自引用';
+                return;
+            }
+
+            // 检测是否会形成循环（child 是否是 parent 的祖先）
+            if (detectCycle(child.id, parent.id, new Set())) {
+                conflictRelations.push({
+                    parent_id: h.parent_id,
+                    child_id: h.child_id,
+                    reason: `循环依赖: ${h.child_id} → ${h.parent_id} 会形成环路`,
+                    type: 'cycle'
+                });
+                parent.isConflict = true;
+                parent.conflictReason = `循环依赖（与节点 ${h.child_id}）`;
+                child.isConflict = true;
+                child.conflictReason = `循环依赖（与节点 ${h.parent_id}）`;
+                return; // 不添加这个关系
+            }
+
+            // 正常添加关系
+            parent.children.push(child);
+            child.parentIds.push(parent.id);
+            child.isRoot = false; // 有父节点，不是根节点
         });
 
-        // 4. 提取根节点 (没有 parentId 或 isRoot 仍为 true 的节点)
+        // 5. 提取根节点
         const rootNodes = [];
+        const conflictNodes = [];
+
         groupsMap.forEach(node => {
-            if (node.isRoot) {
-                // 清理临时标记
-                delete node.isRoot;
-                delete node.parentId;
+            // 清理临时标记
+            delete node.isRoot;
+
+            // 分离冲突节点和正常根节点
+            if (node.isConflict) {
+                conflictNodes.push(node);
+            } else if (node.parentIds.length === 0) {
                 rootNodes.push(node);
             }
         });
-        
-        // 5. 递归清理子节点的临时标记 (因为子节点可能在其他地方被引用)
-        const cleanNode = (node) => {
-             delete node.isRoot;
-             delete node.parentId;
-             node.children.forEach(cleanNode);
-        };
-        rootNodes.forEach(cleanNode);
 
-        console.log("Tree built successfully.", rootNodes);
-        return rootNodes;
+        // 6. 递归清理子节点的临时标记
+        const cleanNode = (node, visited = new Set()) => {
+            if (visited.has(node.id)) return; // 防止循环
+            visited.add(node.id);
+
+            delete node.isRoot;
+            // 保留 parentIds 用于调试，但可以清理
+            // delete node.parentIds;
+            node.children.forEach(c => cleanNode(c, visited));
+        };
+        rootNodes.forEach(n => cleanNode(n));
+
+        // 7. 输出日志
+        if (conflictRelations.length > 0) {
+            console.error("⚠️ 检测到冲突关系:", conflictRelations);
+        }
+        if (conflictNodes.length > 0) {
+            console.error("⚠️ 冲突节点:", conflictNodes.map(n => ({ id: n.id, name: n.name, reason: n.conflictReason })));
+        }
+        console.log("Tree built.", { rootNodes: rootNodes.length, conflictNodes: conflictNodes.length });
+
+        // 返回包含冲突信息的对象
+        return { rootNodes, conflictNodes, conflictRelations };
     }
 
     /**
      * 根据用户输入的关键词/组名，从规则树中膨胀出所有匹配的关键词。
-     * @param {Array<string|object>} inputs - 用户输入的标签数组 (string 或 {text, exclude} 格式)。
-     * @returns {{expandedKeywords: Array<string>}} 包含所有膨胀后的关键词数组。
+     * @param {string} inputText - 单个用户输入的标签文本。
+     * @returns {Array<string>} 膨胀后的关键词数组（包含原始输入）。
      */
+    expandSingleKeyword(inputText) {
+        if (!this.state.rulesTree) return [inputText];
 
-    expandKeywords(inputs) {
-        if (!this.state.rulesTree) return { expandedKeywords: [] };
-        
-        const rawInputs = inputs.map(t => typeof t === 'object' ? t.text : t);
         const uniqueKeywords = new Set();
-        
+        uniqueKeywords.add(inputText); // 始终包含原始输入
+
         /**
          * 递归查找组及其所有子组下的关键词。
          * @param {Object} node - 当前组节点。
          */
         const recursivelyCollectKeywords = (node) => {
-            // 收集当前组所有 'is_enabled=1' 的关键词
+            // 只收集启用组的启用关键词
+            if (!node.isEnabled) return;
+
             node.keywords
                 .filter(k => k.isEnabled)
                 .forEach(k => uniqueKeywords.add(k.text));
-            
+
             // 递归进入子组
             node.children.forEach(recursivelyCollectKeywords);
         };
@@ -510,28 +542,37 @@ class MemeApp {
         // 遍历整个规则树进行匹配
         const traverseAndMatch = (nodes) => {
             nodes.forEach(node => {
+                if (!node.isEnabled) return; // 跳过禁用的组
+
                 // 1. 检查是否直接命中组名
-                if (rawInputs.includes(node.name)) {
+                if (node.name === inputText) {
                     recursivelyCollectKeywords(node);
-                    return; // 组名命中后，不再检查其关键词（避免重复膨胀）
+                    return;
                 }
 
                 // 2. 检查是否命中关键词
-                const matchedKeyword = node.keywords.find(k => rawInputs.includes(k.text));
-                
+                const matchedKeyword = node.keywords.find(k => k.text === inputText);
                 if (matchedKeyword && matchedKeyword.isEnabled) {
                     uniqueKeywords.add(matchedKeyword.text);
                 }
-                
+
                 // 3. 递归检查子节点
                 traverseAndMatch(node.children);
             });
         };
 
         traverseAndMatch(this.state.rulesTree);
-        
-        // 将 Set 转换为数组返回
-        return { expandedKeywords: Array.from(uniqueKeywords) };
+
+        return Array.from(uniqueKeywords);
+    }
+
+    /**
+     * 批量膨胀多个标签，返回二维数组格式。
+     * @param {Array<string>} inputs - 用户输入的标签数组。
+     * @returns {Array<Array<string>>} 二维数组，每个子数组是一个标签膨胀后的关键词列表。
+     */
+    expandKeywordsToGroups(inputs) {
+        return inputs.map(input => this.expandSingleKeyword(input));
     }
 
     /**
@@ -586,11 +627,13 @@ class MemeApp {
                 localStorage.setItem(RULES_VERSION_KEY, conflictData.latest_data.version_id.toString());
 
                 // 重新构建本地规则树 (使用服务器最新的数据)
-                const newRulesTree = this.buildTree(conflictData.latest_data);
-                this.state.rulesTree = newRulesTree;
+                const buildResult = this.buildTree(conflictData.latest_data);
+                this.state.rulesTree = buildResult.rootNodes;
+                this.state.conflictNodes = buildResult.conflictNodes;
+                this.state.conflictRelations = buildResult.conflictRelations;
 
                 // B. 预演/检查有效性
-                const stillValid = this.checkIfActionStillValid(actionType, payload, newRulesTree);
+                const stillValid = this.checkIfActionStillValid(actionType, payload, buildResult.rootNodes);
 
                 if (stillValid) {
                     // C. 自动重放（递归调用，但带重试计数）
@@ -623,15 +666,15 @@ class MemeApp {
 
                 console.log(`Save successful. New version: ${result.version_id}`);
 
-                // 3. 重新拉取规则树（确保UI与服务器状态一致）
-                // 仅在成功后刷新版本和 UI，避免额外 API 调用
-                this.renderRulesTree();
+                // 3. 关键修复：强制重新加载规则树数据并更新本地缓存
+                // 这样刷新页面时 304 返回后能从缓存加载最新数据
+                await this.loadRulesTree(true);
 
                 if (retryCount === 0) {
                     this.showToast('规则保存成功！', 'success');
                 } // 重试成功的提示已在上面的冲突处理中显示
 
-                return { success: true, version_id: result.version_id };
+                return { success: true, version_id: result.version_id, new_id: result.new_id };
             }
 
             throw new Error(`Server returned error status: ${response.status}`);
@@ -640,7 +683,7 @@ class MemeApp {
             console.error("Save failed (final):", e);
             // E. 最终失败，回滚本地乐观更新 (如果需要)
             // this.revertOptimisticUpdate(actionType, payload);
-            this.renderRulesTree(); // 简单粗暴：强制刷新回上次成功状态
+            this.debouncedRenderRulesTree(); // 使用防抖版本刷新
 
             this.showToast('保存失败：网络或服务器错误。', 'error');
             return { success: false, error: e.message };
@@ -677,7 +720,7 @@ class MemeApp {
             enableExcludes: true,
             onChange: (tags) => {
                 this.state.queryTags = tags;
-                // Check trash mode automatically
+                // 自动检测 trash_bin 标签来更新回收站模式视觉状态
                 const hasTrash = tags.some(t => t.text === 'trash_bin' && !t.exclude);
                 if (this.state.isTrashMode !== hasTrash) {
                     this.state.isTrashMode = hasTrash;
@@ -686,7 +729,7 @@ class MemeApp {
             },
             onSubmit: () => this.doSearch(),
             // --- NEW: 传递动态筛选方法给 TagInput ---
-            onInputUpdate: (val) => this.filterAndUpdateDatalist(val) 
+            onInputUpdate: (val) => this.filterAndUpdateDatalist(val)
             // ----------------------------------------
         });
 
@@ -717,6 +760,7 @@ class MemeApp {
             e.stopPropagation();
             this.headerTagInput.clear();
             this.state.queryTags = [];
+            // 清空搜索时重置回收站模式
             this.state.isTrashMode = false;
             this.updateTrashVisuals();
             this.doSearch();
@@ -736,16 +780,17 @@ class MemeApp {
         };
 
         this.dom.fabTrash.onclick = () => {
-            // Toggle trash_bin tag in search
+            // 通过添加/移除 trash_bin 标签来切换回收站模式
             const hasTrash = this.state.queryTags.some(t => t.text === 'trash_bin');
             if (hasTrash) {
-                // Remove it via TagInput method to ensure UI sync
+                // 移除 trash_bin 标签
                 const idx = this.state.queryTags.findIndex(t => t.text === 'trash_bin');
                 if (idx !== -1) this.headerTagInput.removeTag(idx);
             } else {
+                // 添加 trash_bin 标签
                 this.headerTagInput.addTag('trash_bin');
             }
-            // State update is handled by onChange callback of TagInput
+            // 状态更新由 TagInput 的 onChange 回调处理
             this.doSearch();
         };
 
@@ -789,23 +834,68 @@ class MemeApp {
             // this.dom.rulesPanel.classList.add('-translate-x-full');
         };
 
+        // 规则树搜索
+        const treeSearchInput = document.getElementById('rules-tree-search');
+        if (treeSearchInput) {
+            treeSearchInput.addEventListener('input', (e) => {
+                this.filterRulesTree(e.target.value);
+            });
+        }
+
+        // --- 批量编辑模式按钮事件绑定 ---
+        const batchModeBtn = document.getElementById('batch-mode-btn');
+        if (batchModeBtn) {
+            batchModeBtn.onclick = () => this.toggleBatchMode();
+        }
+
+        // --- 刷新规则树按钮事件绑定 ---
+        const refreshRulesBtn = document.getElementById('refresh-rules-btn');
+        if (refreshRulesBtn) {
+            refreshRulesBtn.onclick = () => this.refreshRulesTree();
+        }
+
+        // --- 批量操作工具栏按钮事件绑定 ---
+        const batchSelectAll = document.getElementById('batch-select-all');
+        const batchEnableBtn = document.getElementById('batch-enable-btn');
+        const batchDisableBtn = document.getElementById('batch-disable-btn');
+        const batchDeleteBtn = document.getElementById('batch-delete-btn');
+
+        if (batchSelectAll) batchSelectAll.onclick = () => this.toggleSelectAll();
+        if (batchEnableBtn) batchEnableBtn.onclick = () => this.batchEnableGroups();
+        if (batchDisableBtn) batchDisableBtn.onclick = () => this.batchDisableGroups();
+        if (batchDeleteBtn) batchDeleteBtn.onclick = () => this.batchDeleteGroups();
+
         // Rules Tree Toggle: 树状结构节点展开/收起（事件委托）
         this.dom.rulesTreeContainer.addEventListener('click', (e) => {
-            const headerEl = e.target.closest('.flex.items-center.justify-between');
+            // 处理复选框点击（批量编辑模式）
+            if (e.target.classList.contains('batch-checkbox')) {
+                e.stopPropagation();
+                const groupId = parseInt(e.target.dataset.groupId);
+                if (groupId) {
+                    this.toggleGroupSelection(groupId);
+                }
+                return;
+            }
+
+            const headerEl = e.target.closest('.group-header');
             if (headerEl) {
                 const groupNode = headerEl.closest('.group-node');
                 if (groupNode) {
-                    // 切换关键字和子节点容器的显示状态
-                    const keywordsContainer = groupNode.querySelector('.flex.flex-wrap.gap-1');
-                    const childrenContainer = groupNode.querySelector('.ml-4.border-l');
+                    // 批量编辑模式下点击由 header.onclick 处理，这里只处理非批量模式的委托事件
+                    // 由于 header 已经有自己的 onclick 处理，这里的委托事件主要做兼容
+                    if (!this.state.batchEditMode) {
+                        // 切换关键字和子节点容器的显示状态
+                        const keywordsContainer = groupNode.querySelector('.flex.flex-wrap.gap-1');
+                        const childrenContainer = groupNode.querySelector('.ml-4.border-l');
 
-                    if (keywordsContainer) keywordsContainer.classList.toggle('hidden');
-                    if (childrenContainer) childrenContainer.classList.toggle('hidden');
+                        if (keywordsContainer) keywordsContainer.classList.toggle('hidden');
+                        if (childrenContainer) childrenContainer.classList.toggle('hidden');
 
-                    // 切换 Chevron 图标方向
-                    const chevron = headerEl.querySelector('[data-lucide="chevron-down"]');
-                    if (chevron) {
-                        chevron.classList.toggle('rotate-180');
+                        // 切换 Chevron 图标方向
+                        const chevron = headerEl.querySelector('[data-lucide="chevron-down"]');
+                        if (chevron) {
+                            chevron.classList.toggle('rotate-180');
+                        }
                     }
                 }
             }
@@ -849,7 +939,33 @@ class MemeApp {
         // --- Common ---
         this.dom.fabUpload.onclick = () => this.dom.fileInput.click();
         this.dom.fileInput.onchange = (e) => this.handleUpload(e.target.files);
-        
+
+        // 导出按钮
+        const fabExport = document.getElementById('fab-export');
+        if (fabExport) {
+            fabExport.addEventListener('click', () => {
+                this.exportAllData();
+            });
+        }
+
+        // 导入按钮
+        const fabImport = document.getElementById('fab-import');
+        const jsonInput = document.getElementById('json-import-input');
+
+        if (fabImport && jsonInput) {
+            fabImport.addEventListener('click', () => {
+                jsonInput.click();
+            });
+
+            jsonInput.addEventListener('change', async (e) => {
+                const file = e.target.files?.[0];
+                if (file) {
+                    await this.importAllData(file);
+                    e.target.value = ''; // 清空以允许重复选择同一文件
+                }
+            });
+        }
+
         this.dom.btnReload.onclick = (e) => {
             e.stopPropagation();
             this.resetSearch();
@@ -1058,7 +1174,7 @@ class MemeApp {
         } else {
             // 2. 缓存无效或不存在，从 API 拉取并更新缓存
             tags = await this.fetchTagsFromApi();
-            
+
             // 缓存到本地存储
             if (tags.length > 0) {
                 try {
@@ -1070,10 +1186,28 @@ class MemeApp {
                 }
             }
         }
-        
-        // 3. 更新内存状态和 datalist
-        this.state.allKnownTags = tags;
+
+        // 3. 合并规则树关键词
+        const rulesKeywords = new Set();
+        if (this.state.rulesTree) {
+            const collectKeywords = (nodes) => {
+                nodes.forEach(group => {
+                    rulesKeywords.add(group.name); // 添加组名
+                    group.keywords.forEach(kw => rulesKeywords.add(kw.text)); // 添加关键词
+                    collectKeywords(group.children); // 递归子节点
+                });
+            };
+            collectKeywords(this.state.rulesTree);
+        }
+
+        // 4. 合并去重
+        const allSuggestions = Array.from(new Set([...tags, ...rulesKeywords]));
+
+        // 5. 更新内存状态和 datalist
+        this.state.allKnownTags = allSuggestions;
         this.filterAndUpdateDatalist('');
+
+        console.log(`[Suggestions] Loaded ${allSuggestions.length} suggestions (${tags.length} from images, ${rulesKeywords.size} from rules)`);
     }
     
     // --- 新增辅助函数：将 API 调用逻辑封装，提高可读性 ---
@@ -1098,24 +1232,42 @@ class MemeApp {
     }
 
     async loadMore(isJump = false) {
-        // [修改开始: 关键词膨胀逻辑]
         if (this.state.loading || (!this.state.hasMore && !isJump)) return;
         this.state.loading = true;
         this.dom.loader.classList.remove('hidden');
 
+        // 分离包含和排除标签
         const rawIncludes = this.state.queryTags.filter(t => !t.exclude).map(t => t.text);
         const rawExcludes = this.state.queryTags.filter(t => t.exclude).map(t => t.text);
-        
-        // 膨胀包含词 (Includes)
-        const expandedIncludes = this.expandKeywords(rawIncludes).expandedKeywords;
+
+        // 膨胀包含标签（返回二维数组：每个标签膨胀后的关键词组）
+        const expandedIncludesGroups = this.expandKeywordsToGroups(rawIncludes);
+
+        // 膨胀排除标签（同样返回二维数组）
+        const expandedExcludesGroups = this.expandKeywordsToGroups(rawExcludes);
+
+        // 计算膨胀后的总关键词数（用于用户反馈）
+        const totalExpandedIncludes = expandedIncludesGroups.reduce((sum, g) => sum + g.length, 0);
+        const totalExpandedExcludes = expandedExcludesGroups.reduce((sum, g) => sum + g.length, 0);
+
+        // 用户反馈：显示膨胀信息
+        if (rawIncludes.length > 0 && totalExpandedIncludes > rawIncludes.length) {
+            console.log(`[关键词膨胀] 包含: ${rawIncludes.join(', ')} → ${totalExpandedIncludes} 个关键词`);
+            this.showExpandedKeywordsBadge(rawIncludes.length, totalExpandedIncludes);
+        } else {
+            this.hideExpandedKeywordsBadge();
+        }
+
+        if (rawExcludes.length > 0 && totalExpandedExcludes > rawExcludes.length) {
+            console.log(`[关键词膨胀] 排除: ${rawExcludes.join(', ')} → ${totalExpandedExcludes} 个关键词`);
+        }
 
         const payload = {
             offset: this.state.offset,
             limit: this.state.limit,
             sort_by: this.state.sortBy,
-
-            keywords: expandedIncludes,
-            excludes: rawExcludes
+            keywords: expandedIncludesGroups,  // 二维数组
+            excludes: expandedExcludesGroups   // 二维数组
         };
 
         try {
@@ -1134,9 +1286,6 @@ class MemeApp {
                 this.dom.end.classList.add('hidden');
             }
 
-            // [新增: 搜索完成后，刷新规则树的过滤显示]
-            this.renderRulesTree();
-
             this.renderPageBlock(res.results);
             this.state.offset += res.results.length;
 
@@ -1149,6 +1298,48 @@ class MemeApp {
     }
 
     /**
+     * [新增] 显示关键词膨胀提示徽章
+     */
+    showExpandedKeywordsBadge(original, expanded) {
+        let badge = document.getElementById('expanded-keywords-badge');
+        if (!badge) {
+            badge = document.createElement('div');
+            badge.id = 'expanded-keywords-badge';
+            badge.className = 'ml-2 px-2 py-1 bg-purple-100 text-purple-700 text-xs rounded-full font-bold whitespace-nowrap';
+            this.dom.headerSearchBar.parentElement.appendChild(badge);
+        }
+        badge.textContent = `🌳 ${original} → ${expanded} 词`;
+        badge.title = `原始 ${original} 个关键词已通过规则树膨胀为 ${expanded} 个搜索关键词`;
+        badge.classList.remove('hidden');
+    }
+
+    /**
+     * [新增] 隐藏关键词膨胀提示徽章
+     */
+    hideExpandedKeywordsBadge() {
+        const badge = document.getElementById('expanded-keywords-badge');
+        if (badge) {
+            badge.classList.add('hidden');
+        }
+    }
+
+    /**
+     * [新增] 防抖渲染规则树，避免频繁更新导致的性能问题和版本冲突
+     */
+    debouncedRenderRulesTree() {
+        // 清除之前的待执行渲染
+        if (this.state.pendingRulesRender) {
+            clearTimeout(this.state.pendingRulesRender);
+        }
+
+        // 设置新的延迟渲染
+        this.state.pendingRulesRender = setTimeout(() => {
+            this.renderRulesTree(true); // 跳过建议更新，避免循环
+            this.state.pendingRulesRender = null;
+        }, this.state.rulesRenderDebounceMs);
+    }
+
+    /**
      * 根据搜索标签过滤规则树，保留命中节点及其父路径。
      * @param {Array} tree - 规则树结构。
      * @param {Array<string>} searchTags - 用户输入的搜索标签数组 (已清理)。
@@ -1156,10 +1347,15 @@ class MemeApp {
      */
 
     filterTree(tree, searchTags) {
+        // 处理 tree 为 null 或 undefined 的情况
+        if (!tree) {
+            return [];
+        }
+
         if (!searchTags || searchTags.length === 0) {
             return JSON.parse(JSON.stringify(tree)); // 无标签，返回完整副本
         }
-        
+
         const lowerSearchTags = searchTags.map(t => t.toLowerCase());
 
         /**
@@ -1169,19 +1365,28 @@ class MemeApp {
          */
         const filterRecursive = (nodes) => {
             const filteredNodes = [];
-            
+
             for (const node of nodes) {
                 // 1. 递归过滤子节点
                 const filteredChildren = filterRecursive(node.children);
-                
+
                 // 2. 检查当前节点是否命中 (组名或关键词)
-                const groupNameMatch = lowerSearchTags.some(tag => node.name.toLowerCase().includes(tag));
-                const keywordMatch = node.keywords.some(k => 
+                // 处理空名组的情况：空名组也应该在搜索时显示（如果搜索"空"或"无名"）
+                const nodeName = node.name || '';
+                const isEmptyNameGroup = !nodeName || nodeName.trim() === '';
+
+                // 空名组匹配条件：搜索"空"、"无名"、"empty"等关键词
+                const emptyGroupMatch = isEmptyNameGroup && lowerSearchTags.some(tag =>
+                    ['空', '无名', 'empty', '空组', '无名组'].some(keyword => keyword.includes(tag) || tag.includes(keyword))
+                );
+
+                const groupNameMatch = nodeName && lowerSearchTags.some(tag => nodeName.toLowerCase().includes(tag));
+                const keywordMatch = node.keywords.some(k =>
                     lowerSearchTags.some(tag => k.text.toLowerCase().includes(tag))
                 );
-                
-                const isMatch = groupNameMatch || keywordMatch;
-                
+
+                const isMatch = groupNameMatch || keywordMatch || emptyGroupMatch;
+
                 // 3. 判断是否保留：如果自身匹配或子节点中包含匹配项
                 if (isMatch || filteredChildren.length > 0) {
                     const nodeCopy = {
@@ -1190,12 +1395,12 @@ class MemeApp {
                         isMatch: isMatch // 标记自身是否命中 (用于 UI 高亮)
                     };
                     // 移除对子节点的引用，确保返回的是副本
-                    nodeCopy.children = filteredChildren; 
-                    
+                    nodeCopy.children = filteredChildren;
+
                     filteredNodes.push(nodeCopy);
                 }
             }
-            
+
             return filteredNodes;
         };
 
@@ -1204,123 +1409,196 @@ class MemeApp {
 
     /**
      * 渲染侧边栏的规则树 UI
+     * @param {boolean} skipSuggestionUpdate - 是否跳过建议更新（避免循环调用）
      */
-    renderRulesTree() {
+    renderRulesTree(skipSuggestionUpdate = false) {
         const container = document.getElementById('rules-tree-container');
         const versionInfo = document.getElementById('rules-version-info');
-        
+
         if (!container) return;
-        
+
         versionInfo.textContent = `V${this.state.rulesBaseVersion}`;
-        
-        // 1. 获取过滤后的树结构 (如果搜索栏有输入，则过滤)
-        const searchInputTexts = this.headerTagInput.tags
-            .filter(t => !t.exclude)
-            .map(t => typeof t === 'object' ? t.text : t);
-        
-        // 这里需要实现一个逻辑：只在规则树面板打开时，才根据 Header 搜索栏的内容进行过滤，
-        // 或者使用专用于规则树过滤的输入框。
-        // 为了简化，我们暂时使用完整的树结构进行渲染。
+
+        // 1. 获取规则树搜索框的内容进行过滤（与主搜索栏解耦）
+        const treeSearchInput = document.getElementById('rules-tree-search');
+        const treeSearchText = treeSearchInput ? treeSearchInput.value.trim() : '';
+        const searchInputTexts = treeSearchText ? [treeSearchText] : [];
+
         const treeToRender = this.filterTree(this.state.rulesTree, searchInputTexts);
-        
+
         container.innerHTML = '';
-        
-        if (!treeToRender || treeToRender.length === 0) {
-            container.innerHTML = '<p class="text-sm text-slate-400">暂无规则数据。</p>';
-            // 新增：添加一个快速创建根组的按钮
-            container.innerHTML += '<button id="add-root-group-btn" class="mt-4 p-2 w-full bg-blue-500 text-white rounded text-sm hover:bg-blue-600 transition">添加根组</button>';
-            document.getElementById('add-root-group-btn').onclick = () => this.startGroupEdit(null, container);
-            return;
+
+        // [新增] 始终在顶部添加"添加新组"按钮
+        const addRootButton = document.createElement('button');
+        addRootButton.id = 'add-root-group-btn';
+        addRootButton.className = 'mb-2 p-2 w-full bg-blue-500 text-white rounded-lg text-sm hover:bg-blue-600 transition flex items-center justify-center gap-2 shadow-md';
+        addRootButton.innerHTML = `<span class="text-lg">+</span> 添加新组`;
+        addRootButton.onclick = () => this.showAddGroupDialog();
+        container.appendChild(addRootButton);
+
+        // 标记是否有正常树数据
+        const hasTreeData = treeToRender && treeToRender.length > 0;
+
+        if (!hasTreeData) {
+            // 使用 DOM 方式添加提示，避免 innerHTML 覆盖工具栏
+            const emptyMsg = document.createElement('p');
+            emptyMsg.className = 'text-sm text-slate-400 text-center mt-4';
+            emptyMsg.textContent = '暂无规则数据。';
+            container.appendChild(emptyMsg);
+            // 注意：不要 return，继续执行以渲染冲突区域
         }
 
         /**
          * 递归渲染节点
-         * @param {Array} nodes - 节点数组
-         * @param {HTMLElement} parentEl - 父级 DOM 元素
          */
+        const isBatchMode = this.state.batchEditMode;
+        const selectedIds = this.state.selectedGroupIds;
+
         const renderRecursive = (nodes, parentEl) => {
             nodes.forEach(node => {
                 const isEnabled = node.isEnabled || (node.isEnabled === undefined ? true : false);
+                const isSelected = selectedIds.has(node.id);
 
                 const groupEl = document.createElement('div');
-                groupEl.className = `group-node relative ${isEnabled ? '' : 'opacity-50 italic'} ${node.isMatch ? 'bg-blue-50 border-blue-400' : ''}`;
+                groupEl.className = `group-node group relative ${isEnabled ? '' : 'opacity-50 italic'} ${node.isMatch ? 'bg-blue-50 border-blue-400' : ''}`;
                 groupEl.dataset.id = node.id;
-                groupEl.dataset.name = node.name; // 存名字用于编辑
+                groupEl.dataset.name = node.name || '';  // 处理空名组
 
-                // [新增: 启用拖拽]
+                // 批量编辑模式下也允许拖拽
                 groupEl.draggable = "true";
                 this.bindDragEvents(groupEl);
-                
-                // --- 第一行: 组名 + 交互 ---
-                const header = document.createElement('div');                
-                header.className = `group-header flex items-center justify-between p-2 rounded cursor-pointer ${node.isMatch ? 'hover:bg-blue-100' : 'hover:bg-slate-100'}`;
-                
-                // 组名展示
-                const nameDisplay = document.createElement('div');
 
+                const header = document.createElement('div');
+                header.className = `group-header flex items-center justify-between p-2 rounded cursor-pointer ${node.isMatch ? 'hover:bg-blue-100' : 'hover:bg-slate-100'}`;
+
+                const nameDisplay = document.createElement('div');
                 nameDisplay.className = "flex items-center gap-1 font-bold text-sm";
+
+                // 批量编辑模式下添加复选框
+                const checkboxHtml = isBatchMode ? `
+                    <input type="checkbox" class="batch-checkbox w-4 h-4 mr-2 accent-blue-600 cursor-pointer"
+                           data-group-id="${node.id}" ${isSelected ? 'checked' : ''} />
+                ` : '';
+
+                // 处理空名组：特殊样式标识
+                const isEmptyNameGroup = !node.name || node.name.trim() === '';
+                const displayName = isEmptyNameGroup
+                    ? `<span class="text-red-500 bg-red-50 px-1 rounded">[空名组 #${node.id}]</span>`
+                    : `<span class="group-name-text ${node.isMatch ? 'text-blue-700' : 'text-slate-700'}">${node.name}</span>`;
+
+                // 空名组使用警告图标
+                const folderIcon = isEmptyNameGroup
+                    ? 'alert-triangle'
+                    : (isEnabled ? 'folder' : 'folder-x');
+                const iconColor = isEmptyNameGroup
+                    ? 'text-red-500'
+                    : (node.isMatch ? 'text-blue-600' : 'text-slate-500');
+
                 nameDisplay.innerHTML = `
-                    <i data-lucide="${isEnabled ? 'folder' : 'folder-x'}" class="w-4 h-4 ${node.isMatch ? 'text-blue-600' : 'text-slate-500'}"></i>
-                    <span class="group-name-text ${node.isMatch ? 'text-blue-700' : 'text-slate-700'}">${node.name}</span>
+                    ${checkboxHtml}
+                    <i data-lucide="${folderIcon}" class="w-4 h-4 ${iconColor}"></i>
+                    ${displayName}
                 `;
 
-                // 交互按钮容器
                 const actionButtons = document.createElement('div');
                 actionButtons.className = "flex items-center gap-1";
-                
-                // 添加关键词按钮 (+)
-                const addKeywordBtn = document.createElement('button');
-                addKeywordBtn.className = "p-1 text-green-500 hover:text-green-700 hidden group-hover:block transition-colors";
-                addKeywordBtn.innerHTML = `<i data-lucide="plus" class="w-4 h-4"></i>`;
-                addKeywordBtn.onclick = (e) => {
-                    e.stopPropagation();
-                    this.startKeywordAdd(node.id, keywordsContainer);
-                };
-                
-                // 展开/收起图标
+
                 const chevron = document.createElement('i');
                 chevron.dataset.lucide = "chevron-down";
                 chevron.className = "w-4 h-4 text-slate-400 transition transform";
-                
-                actionButtons.appendChild(addKeywordBtn);
+
+                // 批量编辑模式下隐藏单个操作按钮，只显示 chevron
+                if (!isBatchMode) {
+                    // 添加子组按钮 (新增)
+                    const addChildGroupBtn = document.createElement('button');
+                    addChildGroupBtn.className = "p-1 text-blue-500 hover:text-blue-700 opacity-0 group-hover:opacity-100 transition-opacity";
+                    addChildGroupBtn.innerHTML = `<i data-lucide="folder-plus" class="w-4 h-4"></i>`;
+                    addChildGroupBtn.title = "添加子组";
+                    addChildGroupBtn.onclick = (e) => {
+                        e.stopPropagation();
+                        this.startChildGroupAdd(node.id, keywordsContainer, childrenContainer);
+                    };
+
+                    // 添加关键词按钮
+                    const addKeywordBtn = document.createElement('button');
+                    addKeywordBtn.className = "p-1 text-green-500 hover:text-green-700 opacity-0 group-hover:opacity-100 transition-opacity";
+                    addKeywordBtn.innerHTML = `<i data-lucide="plus" class="w-4 h-4"></i>`;
+                    addKeywordBtn.title = "添加关键词";
+                    addKeywordBtn.onclick = (e) => {
+                        e.stopPropagation();
+                        this.startKeywordAdd(node.id, keywordsContainer);
+                    };
+
+                    // 启用/禁用按钮（配色对调：启用状态显示绿色眼睛，禁用状态显示黄色闭眼）
+                    const toggleEnableBtn = document.createElement('button');
+                    toggleEnableBtn.className = `p-1 opacity-0 group-hover:opacity-100 transition-opacity ${isEnabled ? 'text-emerald-500 hover:text-emerald-700' : 'text-yellow-500 hover:text-yellow-700'}`;
+                    toggleEnableBtn.innerHTML = `<i data-lucide="${isEnabled ? 'eye' : 'eye-off'}" class="w-4 h-4"></i>`;
+                    toggleEnableBtn.title = isEnabled ? "禁用组" : "启用组";
+                    toggleEnableBtn.onclick = (e) => {
+                        e.stopPropagation();
+                        this.toggleGroupEnabled(node);
+                    };
+
+                    // 硬删除按钮
+                    const deleteGroupBtn = document.createElement('button');
+                    deleteGroupBtn.className = "p-1 text-red-500 hover:text-red-700 opacity-0 group-hover:opacity-100 transition-opacity";
+                    deleteGroupBtn.innerHTML = `<i data-lucide="trash-2" class="w-4 h-4"></i>`;
+                    deleteGroupBtn.title = "彻底删除组";
+                    deleteGroupBtn.onclick = (e) => {
+                        e.stopPropagation();
+                        this.deleteGroup(node.id);
+                    };
+
+                    actionButtons.appendChild(addChildGroupBtn);
+                    actionButtons.appendChild(addKeywordBtn);
+                    actionButtons.appendChild(toggleEnableBtn);
+                    actionButtons.appendChild(deleteGroupBtn);
+                }
+
                 actionButtons.appendChild(chevron);
 
                 header.appendChild(nameDisplay);
                 header.appendChild(actionButtons);
-                
-                // --- 事件绑定 ---
+
                 header.onclick = (e) => {
                     e.stopPropagation();
-                    // 切换关键词和子节点容器的显示状态
+
+                    // 如果点击的是复选框，则不在这里处理（由事件委托处理）
+                    if (e.target.classList.contains('batch-checkbox')) {
+                        return;
+                    }
+
+                    // 批量编辑模式下，点击复选框区域切换选中状态（但不影响展开/折叠）
+                    // 复选框点击由上面处理，这里处理点击组名文字的情况
+                    if (isBatchMode && e.target.closest('.group-name-text')) {
+                        this.toggleGroupSelection(node.id);
+                        return;
+                    }
+
+                    // 展开/折叠（批量模式和正常模式都可以）
                     keywordsContainer.classList.toggle('hidden');
                     childrenContainer.classList.toggle('hidden');
                     chevron.classList.toggle('rotate-180');
                 };
-                
-                // 双击编辑组名
+
                 header.ondblclick = (e) => {
                     e.stopPropagation();
+                    // 批量编辑模式下禁用双击编辑
+                    if (isBatchMode) return;
                     this.startGroupEdit(node, nameDisplay, keywordsContainer, childrenContainer);
                 };
-                
-                // --- 第二行: 关键词胶囊 ---
+
                 const keywordsContainer = document.createElement('div');
                 keywordsContainer.className = "flex flex-wrap gap-1 pl-6 pt-1 pb-2 border-l border-slate-200 ml-2 hidden";
-                
-                // 渲染关键词胶囊 (简化，不实现就地编辑 UI)
+
                 node.keywords.forEach(k => {
-                    
-                    const isKeywordMatch = searchInputTexts.some(tag => k.text.toLowerCase().includes(tag));
-
+                    const isKeywordMatch = searchInputTexts.some(tag => k.text.toLowerCase().includes(tag.toLowerCase()));
                     const keywordEl = document.createElement('span');
-
-                    keywordEl.className = `keyword-capsule flex items-center gap-1 px-2 py-0.5 text-xs rounded-full cursor-pointer transition-colors 
+                    keywordEl.className = `keyword-capsule flex items-center gap-1 px-2 py-0.5 text-xs rounded-full cursor-pointer transition-colors
                                             ${k.isEnabled ? (isKeywordMatch ? 'bg-purple-500 text-white hover:bg-purple-600' : 'bg-blue-500 text-white hover:bg-blue-600') : 'bg-slate-300 text-slate-600 hover:bg-slate-400'}`;
-                    
+
                     const textSpan = document.createElement('span');
                     textSpan.textContent = k.text;
-                    
-                    // TODO: 关键词就地编辑逻辑
 
                     const delBtn = document.createElement('button');
                     delBtn.className = "ml-1 text-lg leading-none rounded-full hover:opacity-70 text-white/80 transition-opacity";
@@ -1333,15 +1611,12 @@ class MemeApp {
                     keywordEl.appendChild(textSpan);
                     keywordEl.appendChild(delBtn);
                     keywordsContainer.appendChild(keywordEl);
-                    
                 });
 
-                // [新增: 拖拽目标标记 (Drop Zone Indicator)]
                 const dropZoneIndicator = document.createElement('div');
                 dropZoneIndicator.className = "drop-indicator absolute inset-0 rounded-md border-2 border-transparent pointer-events-none transition-all duration-150";
                 groupEl.appendChild(dropZoneIndicator);
-                
-                // 递归渲染子节点
+
                 const childrenContainer = document.createElement('div');
                 childrenContainer.className = "ml-4 border-l border-slate-200 hidden";
                 renderRecursive(node.children, childrenContainer);
@@ -1350,16 +1625,191 @@ class MemeApp {
                 groupEl.appendChild(keywordsContainer);
                 groupEl.appendChild(childrenContainer);
                 parentEl.appendChild(groupEl);
-
-
             });
         };
 
-        renderRecursive(treeToRender, container);
-        // 重新创建 Lucide 图标 (因为我们创建了新的 DOM 元素)
-        lucide.createIcons(); 
-        // [新增: 为根容器添加放置目标]
+        // 只有有数据时才调用渲染
+        if (hasTreeData) {
+            renderRecursive(treeToRender, container);
+        }
+
+        // ========== 渲染冲突节点区域 ==========
+        const conflictNodes = this.state.conflictNodes || [];
+        const conflictRelations = this.state.conflictRelations || [];
+
+        console.log('[renderRulesTree] 冲突检测:', { conflictNodes: conflictNodes.length, conflictRelations: conflictRelations.length });
+
+        if (conflictNodes.length > 0 || conflictRelations.length > 0) {
+            // 首次发现冲突时弹出 Toast 提醒用户
+            if (!this._hasShownConflictWarning) {
+                this._hasShownConflictWarning = true;
+                this.showToast(`⚠️ 检测到 ${conflictRelations.length} 条数据冲突，请在规则树底部查看并修复`, 'error');
+            }
+
+            // 分隔线
+            const separator = document.createElement('div');
+            separator.className = 'my-4 border-t-2 border-red-300';
+            container.appendChild(separator);
+
+            // 冲突区域标题
+            const conflictHeader = document.createElement('div');
+            conflictHeader.className = 'flex items-center gap-2 p-2 bg-red-100 rounded-lg mb-2';
+            conflictHeader.innerHTML = `
+                <i data-lucide="alert-triangle" class="w-5 h-5 text-red-600"></i>
+                <span class="font-bold text-red-700">⚠️ 检测到数据冲突 (${conflictNodes.length} 个节点, ${conflictRelations.length} 条关系)</span>
+            `;
+            container.appendChild(conflictHeader);
+
+            // 渲染冲突关系列表
+            if (conflictRelations.length > 0) {
+                const relationsContainer = document.createElement('div');
+                relationsContainer.className = 'mb-3 p-2 bg-red-50 rounded border border-red-200';
+
+                const relationsTitle = document.createElement('div');
+                relationsTitle.className = 'text-sm font-bold text-red-700 mb-2';
+                relationsTitle.textContent = '冲突的层级关系：';
+                relationsContainer.appendChild(relationsTitle);
+
+                conflictRelations.forEach(rel => {
+                    const relItem = document.createElement('div');
+                    relItem.className = 'flex items-center justify-between p-2 mb-1 bg-white rounded border border-red-200 text-sm';
+
+                    const infoSpan = document.createElement('span');
+                    infoSpan.className = 'text-red-800';
+                    infoSpan.innerHTML = `
+                        <span class="font-mono bg-red-100 px-1 rounded">parent_id: ${rel.parent_id}</span>
+                        →
+                        <span class="font-mono bg-red-100 px-1 rounded">child_id: ${rel.child_id}</span>
+                        <br><span class="text-red-600 text-xs">${rel.reason}</span>
+                    `;
+
+                    const fixBtn = document.createElement('button');
+                    fixBtn.className = 'px-2 py-1 bg-red-500 text-white text-xs rounded hover:bg-red-600 transition whitespace-nowrap';
+                    fixBtn.innerHTML = `<i data-lucide="trash-2" class="w-3 h-3 inline"></i> 删除此关系`;
+                    fixBtn.onclick = () => this.removeConflictHierarchy(rel.parent_id, rel.child_id);
+
+                    relItem.appendChild(infoSpan);
+                    relItem.appendChild(fixBtn);
+                    relationsContainer.appendChild(relItem);
+                });
+
+                container.appendChild(relationsContainer);
+            }
+
+            // 渲染冲突节点列表
+            if (conflictNodes.length > 0) {
+                const nodesContainer = document.createElement('div');
+                nodesContainer.className = 'p-2 bg-red-50 rounded border border-red-200';
+
+                const nodesTitle = document.createElement('div');
+                nodesTitle.className = 'text-sm font-bold text-red-700 mb-2';
+                nodesTitle.textContent = '受影响的节点：';
+                nodesContainer.appendChild(nodesTitle);
+
+                conflictNodes.forEach(node => {
+                    const nodeItem = document.createElement('div');
+                    nodeItem.className = 'flex items-center justify-between p-2 mb-1 bg-white rounded border border-red-200';
+
+                    const nodeInfo = document.createElement('div');
+                    nodeInfo.className = 'flex items-center gap-2';
+                    nodeInfo.innerHTML = `
+                        <i data-lucide="folder-x" class="w-4 h-4 text-red-500"></i>
+                        <span class="font-bold text-red-800">${node.name || '[空名组]'}</span>
+                        <span class="text-xs text-red-500 bg-red-100 px-1 rounded">ID: ${node.id}</span>
+                        <span class="text-xs text-red-600">${node.conflictReason || ''}</span>
+                    `;
+
+                    const nodeActions = document.createElement('div');
+                    nodeActions.className = 'flex gap-1';
+
+                    // 移到根目录按钮
+                    const moveToRootBtn = document.createElement('button');
+                    moveToRootBtn.className = 'px-2 py-1 bg-blue-500 text-white text-xs rounded hover:bg-blue-600 transition';
+                    moveToRootBtn.innerHTML = `<i data-lucide="home" class="w-3 h-3 inline"></i> 移到根目录`;
+                    moveToRootBtn.onclick = () => this.moveConflictNodeToRoot(node.id);
+
+                    // 删除节点按钮
+                    const deleteBtn = document.createElement('button');
+                    deleteBtn.className = 'px-2 py-1 bg-red-500 text-white text-xs rounded hover:bg-red-600 transition';
+                    deleteBtn.innerHTML = `<i data-lucide="trash-2" class="w-3 h-3 inline"></i> 删除`;
+                    deleteBtn.onclick = () => this.deleteGroup(node.id);
+
+                    nodeActions.appendChild(moveToRootBtn);
+                    nodeActions.appendChild(deleteBtn);
+
+                    nodeItem.appendChild(nodeInfo);
+                    nodeItem.appendChild(nodeActions);
+                    nodesContainer.appendChild(nodeItem);
+                });
+
+                container.appendChild(nodesContainer);
+            }
+        }
+
+        lucide.createIcons();
         this.bindDragEvents(container, true);
+
+        // 只在非跳过模式时更新建议（避免循环调用）
+        if (!skipSuggestionUpdate) {
+            this.updateTreeSearchSuggestions();
+        }
+    }
+
+    /**
+     * 删除冲突的层级关系
+     */
+    async removeConflictHierarchy(parentId, childId) {
+        if (!confirm(`确定要删除这条冲突关系吗？\n(parent_id: ${parentId} → child_id: ${childId})`)) {
+            return;
+        }
+
+        const action = {
+            url: '/api/rules/hierarchy/remove',
+            method: 'POST',
+            type: 'hierarchy/remove'
+        };
+        const payload = {
+            parent_id: parentId,
+            child_id: childId
+        };
+
+        const result = await this.handleSave(action, payload);
+        if (result.success) {
+            this.showToast('冲突关系已删除', 'success');
+        }
+    }
+
+    /**
+     * 将冲突节点移到根目录（删除其所有父关系）
+     */
+    async moveConflictNodeToRoot(nodeId) {
+        if (!confirm(`确定要将节点 ${nodeId} 的所有父关系删除，使其成为根节点吗？`)) {
+            return;
+        }
+
+        // 从冲突关系中找出该节点作为 child 的所有关系
+        const relationsToRemove = (this.state.conflictRelations || [])
+            .filter(rel => rel.child_id === nodeId);
+
+        if (relationsToRemove.length === 0) {
+            this.showToast('未找到需要删除的父关系', 'info');
+            return;
+        }
+
+        for (const rel of relationsToRemove) {
+            const action = {
+                url: '/api/rules/hierarchy/remove',
+                method: 'POST',
+                type: 'hierarchy/remove'
+            };
+            const payload = {
+                parent_id: rel.parent_id,
+                child_id: rel.child_id
+            };
+            await this.handleSave(action, payload);
+        }
+
+        this.showToast(`已删除 ${relationsToRemove.length} 条父关系，节点已移到根目录`, 'success');
     }
 
     // [新增方法] 绑定拖拽事件
@@ -1367,32 +1817,58 @@ class MemeApp {
         if (!el.dataset.id && !isRootContainer) return;
 
         el.addEventListener('dragstart', (e) => {
+            // 允许输入框中的文本选择拖拽（修复编辑模式下无法选中文本的问题）
+            if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
+                return; // 不拦截，允许原生行为
+            }
+
             // 存储被拖拽元素的 ID
             e.stopPropagation();
-            e.dataTransfer.setData('text/plain', el.dataset.id);
+
+            const draggedId = parseInt(el.dataset.id);
+
+            // 批量模式下：如果拖拽的是已选中的组，传递所有选中的组ID
+            // 否则只传递当前拖拽的组ID
+            let dragIds = [draggedId];
+            if (this.state.batchEditMode && this.state.selectedGroupIds.size > 0) {
+                if (this.state.selectedGroupIds.has(draggedId)) {
+                    // 拖拽的是已选中的组，移动所有选中的组
+                    dragIds = Array.from(this.state.selectedGroupIds);
+                }
+                // 否则只移动当前拖拽的组（不在选中列表中）
+            }
+
+            e.dataTransfer.setData('text/plain', JSON.stringify(dragIds));
             e.dataTransfer.effectAllowed = 'move';
-            
+
             // 拖拽时添加一个视觉反馈类
-            el.classList.add('opacity-40', 'border-dashed'); 
+            el.classList.add('opacity-40', 'border-dashed');
+
+            // 批量模式下给所有选中的组添加视觉反馈
+            if (this.state.batchEditMode && dragIds.length > 1) {
+                dragIds.forEach(id => {
+                    const groupEl = document.querySelector(`.group-node[data-id="${id}"]`);
+                    if (groupEl && groupEl !== el) {
+                        groupEl.classList.add('opacity-40', 'border-dashed');
+                    }
+                });
+            }
         });
 
         el.addEventListener('dragend', (e) => {
             // 拖拽结束时移除反馈类
             e.stopPropagation();
             el.classList.remove('opacity-40', 'border-dashed');
+
+            // 移除所有组的拖拽视觉反馈
+            document.querySelectorAll('.group-node.opacity-40').forEach(node => {
+                node.classList.remove('opacity-40', 'border-dashed');
+            });
         });
 
         el.addEventListener('dragover', (e) => {
             e.preventDefault(); // 允许放置
             e.dataTransfer.dropEffect = 'move';
-            
-            const draggedId = e.dataTransfer.getData('text/plain');
-            const targetId = el.dataset.id;
-            
-            // 避免拖拽到自身或根容器自身
-            if (draggedId === targetId || (isRootContainer && !draggedId)) {
-                return;
-            }
 
             // 添加拖拽目标视觉反馈
             const indicator = el.querySelector('.drop-indicator');
@@ -1421,7 +1897,17 @@ class MemeApp {
             e.preventDefault();
             e.stopPropagation();
 
-            const childId = parseInt(e.dataTransfer.getData('text/plain'));
+            let childIds = [];
+            try {
+                const data = e.dataTransfer.getData('text/plain');
+                childIds = JSON.parse(data);
+                if (!Array.isArray(childIds)) {
+                    childIds = [parseInt(data)];
+                }
+            } catch {
+                childIds = [parseInt(e.dataTransfer.getData('text/plain'))];
+            }
+
             const parentId = isRootContainer ? 0 : parseInt(el.dataset.id); // 0 代表根节点
 
             // 移除拖拽目标视觉反馈
@@ -1432,47 +1918,368 @@ class MemeApp {
             } else if (isRootContainer) {
                 el.style.backgroundColor = '';
             }
-            
-            if (childId && childId !== parentId) {
-                this.handleHierarchyChange(parentId, childId);
+
+            // 过滤掉无效的ID和自身
+            childIds = childIds.filter(id => id && id !== parentId);
+
+            if (childIds.length > 0) {
+                this.handleBatchHierarchyChange(parentId, childIds);
             } else {
-                 this.showToast('无法将组拖拽到自身。', 'error');
+                this.showToast('无法将组拖拽到自身。', 'error');
             }
         });
     }
 
     /**
-     * [新增方法] 处理层级关系的修改（拖拽成功）。
+     * [新增] 批量处理层级关系的修改(支持批量拖拽)。
+     * 使用后端批量接口，一次请求完成所有移动操作。
+     * @param {number} parentId - 目标父组 ID (0 代表根节点)。
+     * @param {number[]} childIds - 被拖拽的子组 ID 数组。
+     */
+    async handleBatchHierarchyChange(parentId, childIds) {
+        // 单个组的情况，调用原有方法
+        if (childIds.length === 1) {
+            return this.handleHierarchyChange(parentId, childIds[0]);
+        }
+
+        // 防止重复触发
+        if (this._isHandlingHierarchyChange) {
+            console.log('[handleBatchHierarchyChange] 已在处理中，跳过重复调用');
+            return;
+        }
+        this._isHandlingHierarchyChange = true;
+
+        try {
+            // ★ 关键修复：前端循环检测（批量版本）
+            const cycleErrors = [];
+            for (const childId of childIds) {
+                if (this.wouldCreateCycle(parentId, childId)) {
+                    cycleErrors.push(childId);
+                }
+            }
+            if (cycleErrors.length > 0) {
+                this.showToast(`❌ 无法移动：${cycleErrors.length} 个组会形成循环依赖！`, 'error');
+                console.error(`[handleBatchHierarchyChange] 循环检测失败的节点:`, cycleErrors);
+                return;
+            }
+
+            this.showToast(`正在移动 ${childIds.length} 个组...`, 'info');
+
+            // 使用后端批量移动接口
+            const payload = {
+                parent_id: parentId,
+                child_ids: childIds,
+                base_version: this.state.rulesBaseVersion,
+                client_id: this.state.clientId
+            };
+
+            const response = await fetch('/api/rules/hierarchy/batch_move', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
+            const result = await response.json();
+
+            if (response.status === 409) {
+                // 版本冲突，重新加载规则树
+                this.showToast('版本冲突，正在重新加载...', 'warning');
+                await this.loadRulesTree(true);
+                return;
+            }
+
+            if (result.success) {
+                // 更新本地版本号
+                if (result.version_id) {
+                    this.state.rulesBaseVersion = result.version_id;
+                }
+
+                const movedCount = result.moved || 0;
+                const errors = result.errors || [];
+
+                if (errors.length === 0) {
+                    this.showToast(`已移动 ${movedCount} 个组`, 'success');
+                } else {
+                    this.showToast(`移动完成：${movedCount} 成功，${errors.length} 失败`, 'warning');
+                    console.log('[handleBatchHierarchyChange] 部分失败:', errors);
+                }
+
+                // 刷新规则树
+                await this.loadRulesTree(true);
+
+                // 清空批量选择
+                if (this.state.batchEditMode) {
+                    this.state.selectedGroupIds.clear();
+                    this.updateBatchToolbarUI();
+                }
+            } else {
+                this.showToast(`移动失败: ${result.error || '未知错误'}`, 'error');
+            }
+
+        } catch (error) {
+            console.error('[handleBatchHierarchyChange] 请求失败:', error);
+            this.showToast('网络错误，请重试', 'error');
+        } finally {
+            this._isHandlingHierarchyChange = false;
+        }
+    }
+
+    /**
+     * [新增] 前端本地循环检测：检查将 childId 设为 parentId 的子节点是否会形成环路
+     * @param {number} parentId - 目标父组 ID
+     * @param {number} childId - 被拖拽的子组 ID
+     * @returns {boolean} true 表示会形成环路，false 表示安全
+     */
+    wouldCreateCycle(parentId, childId) {
+        if (parentId === childId) return true;  // 自引用
+        if (parentId === 0) return false;       // 移动到根节点不可能成环
+
+        // 从 parentId 向上查找所有祖先，如果 childId 在祖先链中，则会形成环
+        const visited = new Set();
+
+        const findNodeById = (nodes, targetId) => {
+            if (!nodes) return null;
+            for (const node of nodes) {
+                if (node.id === targetId) return node;
+                const found = findNodeById(node.children, targetId);
+                if (found) return found;
+            }
+            return null;
+        };
+
+        // 构建父节点映射（每个节点的直接父节点）
+        const parentMap = new Map();
+        const buildParentMap = (nodes, parentNode = null) => {
+            nodes.forEach(node => {
+                if (parentNode) {
+                    // 一个节点可能有多个父节点（在你的数据模型中），这里收集所有
+                    if (!parentMap.has(node.id)) {
+                        parentMap.set(node.id, []);
+                    }
+                    parentMap.get(node.id).push(parentNode.id);
+                }
+                buildParentMap(node.children, node);
+            });
+        };
+        buildParentMap(this.state.rulesTree || []);
+
+        // 从 parentId 向上遍历，检查是否能到达 childId
+        const checkAncestors = (currentId) => {
+            if (currentId === childId) return true;  // 找到了！会形成环
+            if (visited.has(currentId)) return false;
+            visited.add(currentId);
+
+            const parents = parentMap.get(currentId) || [];
+            for (const pid of parents) {
+                if (checkAncestors(pid)) return true;
+            }
+            return false;
+        };
+
+        return checkAncestors(parentId);
+    }
+
+    /**
+     * [优化] 处理层级关系的修改(拖拽成功)。
+     * 先移除子组的所有现有父节点,再建立新的父子关系。
      * @param {number} parentId - 目标父组 ID (0 代表根节点)。
      * @param {number} childId - 被拖拽的子组 ID。
      */
     async handleHierarchyChange(parentId, childId) {
-        // 简化处理：假设拖拽总是建立新的父子关系 (添加)
-        const payload = {
-            parent_id: parentId,
-            child_id: childId
-        };
-
-        const action = {
-            url: '/api/rules/hierarchy/add',
-            method: 'POST',
-            type: 'hierarchy/add'
-        };
-
-        // 提示用户操作
-        this.showToast(`尝试将组 ${childId} 移动到 ${parentId === 0 ? '根目录' : '组 ' + parentId}...`, 'info');
-
-        const result = await this.handleSave(action, payload);
-        
-        if (result.success) {
-            // handleSave 内部会调用 renderRulesTree 刷新 UI
-            this.showToast('层级关系更新成功！', 'success');
-        } else if (result.error && result.error.includes("Cannot link group to itself")) {
-             this.showToast('保存失败：无法将组链接到自身。', 'error');
-        } else {
-             // 冲突处理失败已在 handleSave 中处理
-             this.showToast('层级更新失败：请刷新重试。', 'error');
+        // 防止重复触发：如果正在处理拖拽，直接返回
+        if (this._isHandlingHierarchyChange) {
+            console.log('[handleHierarchyChange] 已在处理中，跳过重复调用');
+            return;
         }
+        this._isHandlingHierarchyChange = true;
+
+        try {
+            // ★ 关键修复：前端循环检测（在任何操作前检查）
+            if (this.wouldCreateCycle(parentId, childId)) {
+                this.showToast('❌ 无法移动：这会形成循环依赖！', 'error');
+                console.error(`[handleHierarchyChange] 循环检测：将节点 ${childId} 移到 ${parentId} 下会形成环路`);
+                return;
+            }
+
+            // 1. 查找子组的直接父节点（修复：只找直接父节点，不是所有祖先）
+            const findDirectParents = (tree, targetId) => {
+                const parents = [];
+                const traverse = (nodes) => {
+                    nodes.forEach(node => {
+                        // 检查当前节点的 children 是否直接包含目标节点
+                        const isDirectParent = node.children.some(child => child.id === targetId);
+                        if (isDirectParent) {
+                            parents.push(node.id);
+                        }
+                        // 继续递归遍历
+                        traverse(node.children);
+                    });
+                };
+                traverse(tree);
+                return parents;
+            };
+
+            const existingParents = findDirectParents(this.state.rulesTree, childId);
+            console.log(`[handleHierarchyChange] 子节点 ${childId} 的直接父节点:`, existingParents);
+
+            // 如果目标父节点已经是现有父节点之一，无需操作
+            if (existingParents.includes(parentId)) {
+                this.showToast('该组已在目标位置', 'info');
+                return;
+            }
+
+            // 2. 依次移除所有现有父子关系
+            for (const oldParentId of existingParents) {
+                const removeAction = {
+                    url: '/api/rules/hierarchy/remove',
+                    method: 'POST',
+                    type: 'hierarchy/remove'
+                };
+                const removePayload = {
+                    parent_id: oldParentId,
+                    child_id: childId
+                };
+                const removeResult = await this.handleSave(removeAction, removePayload);
+                if (!removeResult.success) {
+                    this.showToast(`移除旧关系失败 (父节点 ${oldParentId})`, 'error');
+                    return;
+                }
+            }
+
+            // 3. 建立新的父子关系 (如果目标不是根节点)
+            if (parentId !== 0) {
+                const addAction = {
+                    url: '/api/rules/hierarchy/add',
+                    method: 'POST',
+                    type: 'hierarchy/add'
+                };
+                const addPayload = {
+                    parent_id: parentId,
+                    child_id: childId
+                };
+                const addResult = await this.handleSave(addAction, addPayload);
+
+                if (addResult.success) {
+                    this.showToast(`已移动到组 ${parentId}`, 'success');
+                } else if (addResult.error && addResult.error.includes("Cannot create cycle")) {
+                    this.showToast('保存失败：无法形成循环引用。', 'error');
+                } else {
+                    this.showToast('层级更新失败：请刷新重试。', 'error');
+                }
+            } else {
+                // 移动到根节点：只需移除所有父关系即可
+                this.showToast(`已移动到根目录`, 'success');
+            }
+        } finally {
+            // 确保标志位被重置
+            this._isHandlingHierarchyChange = false;
+        }
+    }
+
+    /**
+     * [新增] 启动子组添加模式。
+     * @param {number} parentId - 父组 ID。
+     * @param {HTMLElement} keywordsContainer - 关键词容器 (用于隐藏)。
+     * @param {HTMLElement} childrenContainer - 子节点容器 (用于显示和添加新组)。
+     */
+    startChildGroupAdd(parentId, keywordsContainer, childrenContainer) {
+        // 确保子节点容器可见
+        if (keywordsContainer) keywordsContainer.classList.add('hidden');
+        childrenContainer.classList.remove('hidden');
+
+        // 创建临时容器
+        const editorContainer = document.createElement('div');
+        editorContainer.className = "child-group-add-wrapper p-2 bg-white rounded shadow-md flex flex-col gap-2 mb-2";
+
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.placeholder = '输入新子组名称...';
+        input.className = "w-full p-1 border border-blue-400 rounded text-sm font-medium focus:outline-none focus:ring-1 focus:ring-blue-500";
+
+        const actionBtns = document.createElement('div');
+        actionBtns.className = "flex justify-between items-center text-xs";
+
+        const saveBtn = document.createElement('button');
+        saveBtn.textContent = '创建';
+        saveBtn.className = "px-3 py-1 bg-blue-500 text-white rounded hover:bg-blue-600 transition";
+
+        const cancelBtn = document.createElement('button');
+        cancelBtn.textContent = '取消';
+        cancelBtn.className = "px-3 py-1 bg-slate-200 text-slate-700 rounded hover:bg-slate-300 transition";
+
+        actionBtns.appendChild(cancelBtn);
+        actionBtns.appendChild(saveBtn);
+
+        editorContainer.appendChild(input);
+        editorContainer.appendChild(actionBtns);
+
+        childrenContainer.insertBefore(editorContainer, childrenContainer.firstChild);
+        input.focus();
+
+        const cleanup = () => {
+            editorContainer.remove();
+        };
+
+        const save = async () => {
+            const groupName = input.value.trim();
+            if (!groupName) {
+                this.showToast('组名不能为空！', 'error');
+                return;
+            }
+
+            // 1. 创建新组
+            const addGroupAction = {
+                url: '/api/rules/group/add',
+                method: 'POST',
+                type: 'group/add'
+            };
+            const addGroupPayload = {
+                group_name: groupName,
+                is_enabled: 1
+            };
+
+            const groupResult = await this.handleSave(addGroupAction, addGroupPayload);
+
+            if (!groupResult.success) {
+                this.showToast('创建组失败', 'error');
+                cleanup();
+                return;
+            }
+
+            const newGroupId = groupResult.new_id;
+
+            // 2. 建立父子关系
+            const addHierarchyAction = {
+                url: '/api/rules/hierarchy/add',
+                method: 'POST',
+                type: 'hierarchy/add'
+            };
+            const addHierarchyPayload = {
+                parent_id: parentId,
+                child_id: newGroupId
+            };
+
+            const hierarchyResult = await this.handleSave(addHierarchyAction, addHierarchyPayload);
+
+            if (hierarchyResult.success) {
+                this.showToast(`子组「${groupName}」已创建`, 'success');
+            } else {
+                this.showToast('建立关系失败', 'error');
+            }
+        };
+
+        saveBtn.onclick = save;
+        cancelBtn.onclick = cleanup;
+
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                save();
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                cleanup();
+            }
+        });
     }
 
     /**
@@ -1499,18 +2306,30 @@ class MemeApp {
         keywordsContainer.appendChild(wrapper);
 
         input.focus();
-        
+
+        // 先声明 handleClickOutside 变量，稍后定义
+        let handleClickOutside = null;
+
         const cleanup = () => {
+            if (handleClickOutside) {
+                document.removeEventListener('click', handleClickOutside);
+            }
             wrapper.remove();
         };
 
         const save = async () => {
+            // 保存时立即移除监听器，防止重复触发
+            if (handleClickOutside) {
+                document.removeEventListener('click', handleClickOutside);
+                handleClickOutside = null; // 清空引用防止再次移除
+            }
+
             const keyword = input.value.trim();
             if (!keyword) {
                 cleanup();
                 return;
             }
-            
+
             const payload = {
                 group_id: groupId,
                 keyword: keyword
@@ -1543,7 +2362,7 @@ class MemeApp {
         input.addEventListener('keydown', handleKeyDown);
 
         // 点击外部保存逻辑
-        const handleClickOutside = (e) => {
+        handleClickOutside = (e) => {
              if (!wrapper.contains(e.target)) {
                  save();
              }
@@ -1587,138 +2406,226 @@ class MemeApp {
      * @param {HTMLElement} keywordsContainer - 关键词容器 (用于隐藏)。
      * @param {HTMLElement} childrenContainer - 子节点容器 (用于隐藏)。
      */
-    startGroupEdit(node, displayEl, keywordsContainer, childrenContainer) {
-        const isNew = node === null;
-        const originalName = isNew ? '' : node.name;
-        const originalIsEnabled = isNew ? 1 : node.isEnabled;
-        
-        // 隐藏其他内容
-        if (!isNew) {
-            displayEl.classList.add('hidden');
-            if(keywordsContainer) keywordsContainer.classList.add('hidden');
-            if(childrenContainer) childrenContainer.classList.add('hidden');
-        } else {
-            // 新建模式下，在父容器顶部插入编辑框
-            displayEl.innerHTML = '';
+    /**
+     * 显示添加新组的对话框
+     */
+    showAddGroupDialog() {
+        const container = document.getElementById('rules-tree-container');
+        const addButton = document.getElementById('add-root-group-btn');
+
+        if (!container || !addButton) return;
+
+        // 检查是否已有编辑框存在
+        if (container.querySelector('.new-group-editor')) {
+            return;
         }
 
-        // 创建输入框
+        // 创建编辑框
+        const editorWrapper = document.createElement('div');
+        editorWrapper.className = 'new-group-editor mb-2 p-2 bg-white border border-blue-300 rounded-lg shadow-md flex flex-col gap-2';
+
         const input = document.createElement('input');
         input.type = 'text';
-        input.value = originalName;
-        input.placeholder = isNew ? '输入新组名...' : '编辑组名...';
-        input.className = "w-full p-1 border border-blue-400 rounded text-sm font-medium focus:outline-none focus:ring-1 focus:ring-blue-500";
-        
-        const editorWrapper = document.createElement('div');
-        editorWrapper.className = "group-editor-wrapper p-2 bg-white rounded shadow-md flex flex-col gap-2";
-        
-        // 组装操作按钮
+        input.placeholder = '输入新组名...';
+        input.className = 'w-full p-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-300 focus:border-blue-400';
+
         const actionBtns = document.createElement('div');
-        actionBtns.className = "flex justify-between items-center text-xs";
-        
-        const saveBtn = document.createElement('button');
-        saveBtn.textContent = '保存';
-        saveBtn.className = "px-3 py-1 bg-blue-500 text-white rounded hover:bg-blue-600 transition";
-        
+        actionBtns.className = 'flex justify-end gap-2';
+
         const cancelBtn = document.createElement('button');
         cancelBtn.textContent = '取消';
-        cancelBtn.className = "px-3 py-1 bg-slate-200 text-slate-700 rounded hover:bg-slate-300 transition";
-        
-        const deleteBtn = document.createElement('button');
-        deleteBtn.textContent = isNew ? '清除' : (originalIsEnabled ? '软删' : '恢复');
-        deleteBtn.className = `px-3 py-1 text-white rounded transition ${isNew ? 'bg-slate-400' : (originalIsEnabled ? 'bg-red-500 hover:bg-red-600' : 'bg-emerald-500 hover:bg-emerald-600')}`;
-        deleteBtn.style.marginLeft = 'auto'; // 推到右边
+        cancelBtn.className = 'px-3 py-1 text-xs bg-slate-200 text-slate-700 rounded hover:bg-slate-300 transition';
+
+        const saveBtn = document.createElement('button');
+        saveBtn.textContent = '创建';
+        saveBtn.className = 'px-3 py-1 text-xs bg-blue-500 text-white rounded hover:bg-blue-600 transition';
 
         actionBtns.appendChild(cancelBtn);
-        if (!isNew) actionBtns.appendChild(deleteBtn);
         actionBtns.appendChild(saveBtn);
-        
+
         editorWrapper.appendChild(input);
         editorWrapper.appendChild(actionBtns);
 
-        // 插入 DOM
-        if (isNew) {
-            displayEl.prepend(editorWrapper);
-        } else {
-            // 替换组名显示区
-            displayEl.parentElement.replaceChild(editorWrapper, displayEl);
-        }
-
+        // 插入到添加按钮之后
+        addButton.after(editorWrapper);
         input.focus();
-        
+
+        // 清理函数
         const cleanup = () => {
-             // 清除事件监听器
-             document.removeEventListener('click', handleClickOutside);
-             input.removeEventListener('keydown', handleKeyDown);
-             
-             // 恢复 UI
-             editorWrapper.remove();
-             if (!isNew) {
-                 // 恢复组名显示
-                 displayEl.parentElement.replaceChild(displayEl, editorWrapper);
-                 displayEl.classList.remove('hidden');
-             }
-             this.renderRulesTree(); // 强制刷新以保证状态一致
+            editorWrapper.remove();
         };
-        
+
+        // 保存函数
         const save = async () => {
-            const newName = input.value.trim();
-            if (!newName) {
+            const groupName = input.value.trim();
+            if (!groupName) {
                 this.showToast('组名不能为空！', 'error');
                 return;
             }
-            
-            const payload = {
-                group_id: isNew ? null : node.id,
-                group_name: newName,
-                is_enabled: originalIsEnabled
-            };
 
             const action = {
-                url: isNew ? '/api/rules/group/add' : '/api/rules/group/update',
+                url: '/api/rules/group/add',
                 method: 'POST',
-                type: isNew ? 'group/add' : 'group/update'
+                type: 'group/add'
             };
+            const payload = { group_name: groupName };
 
             const result = await this.handleSave(action, payload);
             if (result.success) {
-                // 成功后，由 handleSave 内部调用 renderRulesTree 刷新 UI
-            } else if (result.conflict) {
-                 // 冲突处理失败，alert 已在 handleSave 中处理
-            } else {
-                 // 其他错误，UI 恢复原状
-                 cleanup();
-            }
-            if (!result.success) cleanup(); // 如果保存失败，手动清理
-        };
-        
-        const toggleSoftDelete = async () => {
-            const payload = {
-                group_id: node.id,
-                group_name: originalName, // 保持组名不变
-                is_enabled: originalIsEnabled ? 0 : 1 // 切换状态
-            };
-
-            const action = {
-                url: '/api/rules/group/update',
-                method: 'POST',
-                type: 'group/update_status'
-            };
-
-            const result = await this.handleSave(action, payload);
-            if (result.success) {
-                // 成功后由 handleSave 刷新 UI
-            } else {
-                // 失败后，手动清理
                 cleanup();
+                this.showToast(`已创建组: ${groupName}`, 'success');
             }
         };
 
         // 绑定事件
         saveBtn.onclick = save;
         cancelBtn.onclick = cleanup;
-        if (!isNew) deleteBtn.onclick = toggleSoftDelete;
-        
+
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                save();
+            } else if (e.key === 'Escape') {
+                cleanup();
+            }
+        });
+
+        // 点击外部关闭
+        const handleClickOutside = (e) => {
+            if (!editorWrapper.contains(e.target) && e.target !== addButton) {
+                cleanup();
+                document.removeEventListener('click', handleClickOutside);
+            }
+        };
+        setTimeout(() => {
+            document.addEventListener('click', handleClickOutside);
+        }, 100);
+    }
+
+    /**
+     * 启动组名编辑模式（仅用于编辑已有组）
+     */
+    startGroupEdit(node, displayEl, keywordsContainer, childrenContainer) {
+        if (!node) return; // 新建组请使用 showAddGroupDialog
+
+        const originalName = node.name || '';  // 处理空名组
+        const originalIsEnabled = node.isEnabled;
+        const isEmptyNameGroup = !originalName || originalName.trim() === '';
+
+        // 隐藏其他内容
+        displayEl.classList.add('hidden');
+        if(keywordsContainer) keywordsContainer.classList.add('hidden');
+        if(childrenContainer) childrenContainer.classList.add('hidden');
+
+        // 创建输入框
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.value = originalName;
+        input.placeholder = isEmptyNameGroup ? '请输入组名以修复空名组...' : '输入组名...';
+        input.className = `w-full p-1 border rounded text-sm font-medium focus:outline-none focus:ring-1 ${isEmptyNameGroup ? 'border-red-400 focus:ring-red-500 bg-red-50' : 'border-blue-400 focus:ring-blue-500'}`;
+
+        const editorWrapper = document.createElement('div');
+        editorWrapper.className = "group-editor-wrapper p-2 bg-white rounded shadow-md flex flex-col gap-2";
+
+        // 组装操作按钮
+        const actionBtns = document.createElement('div');
+        actionBtns.className = "flex justify-between items-center text-xs";
+
+        const saveBtn = document.createElement('button');
+        saveBtn.textContent = '保存';
+        saveBtn.className = "px-3 py-1 bg-blue-500 text-white rounded hover:bg-blue-600 transition";
+
+        const cancelBtn = document.createElement('button');
+        cancelBtn.textContent = '取消';
+        cancelBtn.className = "px-3 py-1 bg-slate-200 text-slate-700 rounded hover:bg-slate-300 transition";
+
+        const deleteBtn = document.createElement('button');
+        deleteBtn.textContent = originalIsEnabled ? '软删' : '恢复';
+        deleteBtn.className = `px-3 py-1 text-white rounded transition ${originalIsEnabled ? 'bg-red-500 hover:bg-red-600' : 'bg-emerald-500 hover:bg-emerald-600'}`;
+        deleteBtn.style.marginLeft = 'auto'; // 推到右边
+
+        actionBtns.appendChild(cancelBtn);
+        actionBtns.appendChild(deleteBtn);
+        actionBtns.appendChild(saveBtn);
+
+        editorWrapper.appendChild(input);
+        editorWrapper.appendChild(actionBtns);
+
+        // 替换组名显示区
+        displayEl.parentElement.replaceChild(editorWrapper, displayEl);
+
+        input.focus();
+
+        // 先声明 handleClickOutside 变量，稍后定义
+        let handleClickOutside = null;
+        let isSaving = false; // 防止重复保存
+
+        const cleanup = () => {
+             // 清除事件监听器
+             if (handleClickOutside) {
+                 document.removeEventListener('click', handleClickOutside);
+                 handleClickOutside = null;
+             }
+             input.removeEventListener('keydown', handleKeyDown);
+
+             // 恢复 UI
+             editorWrapper.remove();
+             // 恢复组名显示
+             editorWrapper.parentElement?.appendChild(displayEl);
+             displayEl.classList.remove('hidden');
+             this.debouncedRenderRulesTree(); // 使用防抖刷新
+        };
+
+        const save = async () => {
+            // 防止重复保存
+            if (isSaving) return;
+            isSaving = true;
+
+            // 立即移除监听器，防止重复触发
+            if (handleClickOutside) {
+                document.removeEventListener('click', handleClickOutside);
+                handleClickOutside = null;
+            }
+
+            const newName = input.value.trim();
+            if (!newName) {
+                this.showToast('组名不能为空！', 'error');
+                isSaving = false;
+                return;
+            }
+
+            // 如果组名没有变化，直接清理不发请求
+            if (newName === originalName) {
+                cleanup();
+                return;
+            }
+
+            const payload = {
+                group_id: node.id,
+                group_name: newName,
+                is_enabled: originalIsEnabled
+            };
+
+            const action = {
+                url: '/api/rules/group/update',
+                method: 'POST',
+                type: 'group/update'
+            };
+
+            const result = await this.handleSave(action, payload);
+            if (!result.success) {
+                cleanup(); // 如果保存失败，手动清理
+            }
+        };
+
+        // 绑定事件
+        saveBtn.onclick = save;
+        cancelBtn.onclick = cleanup;
+        deleteBtn.onclick = async () => {
+            await this.toggleGroupEnabled(node);
+            cleanup();
+        };
+
         const handleKeyDown = (e) => {
             if (e.key === 'Enter') {
                 e.preventDefault();
@@ -1730,33 +2637,64 @@ class MemeApp {
         };
         input.addEventListener('keydown', handleKeyDown);
 
-        // 点击外部关闭逻辑
-        const handleClickOutside = (e) => {
+        // 点击外部关闭逻辑（赋值给已声明的变量）
+        handleClickOutside = (e) => {
             if (!editorWrapper.contains(e.target) && e.target !== displayEl) {
-                // 如果是新组，且没有输入内容，则直接清理
-                if (isNew && input.value.trim() === '') {
-                    cleanup();
-                } else {
-                    // 否则尝试保存
-                    save(); 
-                }
+                // 尝试保存
+                save();
             }
         };
         setTimeout(() => document.addEventListener('click', handleClickOutside), 0);
     }
-    
+
+
+    /**
+     * 手动刷新规则树（清除缓存并重新加载）
+     */
+    async refreshRulesTree() {
+        const refreshBtn = document.getElementById('refresh-rules-btn');
+        const icon = refreshBtn?.querySelector('i');
+
+        // 添加旋转动画
+        if (icon) {
+            icon.classList.add('animate-spin');
+        }
+
+        this.showToast('正在刷新规则树...', 'info');
+
+        // 清除本地缓存版本号，强制从服务器获取最新数据
+        this.state.rulesBaseVersion = 0;
+        localStorage.removeItem(RULES_VERSION_KEY);
+
+        // 重置冲突警告标记，允许重新显示
+        this._hasShownConflictWarning = false;
+
+        try {
+            await this.loadRulesTree(true);
+            this.showToast('规则树已刷新', 'success');
+        } catch (error) {
+            console.error('刷新规则树失败:', error);
+            this.showToast('刷新失败，请重试', 'error');
+        } finally {
+            // 移除旋转动画
+            if (icon) {
+                icon.classList.remove('animate-spin');
+            }
+        }
+    }
 
     // 修正 loadRulesTree，使其在加载数据后调用 buildTree 和 renderRulesTree
     async loadRulesTree(forceRefresh = false) {
-    // 1. 检查本地存储中的版本号
+        // 1. 检查本地存储中的版本号和缓存数据
         const localVersion = this.state.rulesBaseVersion;
-        
+        const RULES_CACHE_KEY = 'bqbq_rules_cache';
+
         // 修复：将 headers 定义移入 try 块之前，确保其作用域覆盖整个函数
         const headers = {
             // 传递 ETag (版本号)
-            'If-None-Match': localVersion.toString() 
+            'If-None-Match': localVersion.toString()
         };
-        
+
         if (forceRefresh) {
             // 如果是强制刷新（如冲突后），移除缓存头
             delete headers['If-None-Match'];
@@ -1767,26 +2705,53 @@ class MemeApp {
 
             if (res.status === 304) {
                 console.log(`Rules synchronized: Version ${localVersion} is current.`);
-                this.renderRulesTree(); // 规则未变，但刷新版本号和 UI
-                // 304 Not Modified: 规则未变，无需操作
+
+                // 关键修复：从本地存储加载缓存的规则数据
+                const cachedRulesData = localStorage.getItem(RULES_CACHE_KEY);
+                if (cachedRulesData && !this.state.rulesTree) {
+                    try {
+                        const data = JSON.parse(cachedRulesData);
+                        const buildResult = this.buildTree(data);
+                        this.state.rulesTree = buildResult.rootNodes;
+                        this.state.conflictNodes = buildResult.conflictNodes;
+                        this.state.conflictRelations = buildResult.conflictRelations;
+                        this.state.allKnownTags = data.keywords.map(k => k.keyword);
+                        this.filterAndUpdateDatalist('');
+                        console.log('[304] Loaded rules from localStorage cache');
+                    } catch (e) {
+                        console.error('[304] Failed to parse cached rules:', e);
+                    }
+                }
+
+                this.renderRulesTree(); // 渲染 UI
                 return;
             }
 
             if (res.ok) {
                 const data = await res.json();
-                
+
                 this.state.rulesBaseVersion = data.version_id;
                 localStorage.setItem(RULES_VERSION_KEY, data.version_id.toString());
-                
-                // 3. 构建树结构 (Prompt 4 核心)
-                this.state.rulesTree = this.buildTree(data); 
-                
+
+                // 缓存完整的规则数据到 localStorage
+                try {
+                    localStorage.setItem(RULES_CACHE_KEY, JSON.stringify(data));
+                } catch (e) {
+                    console.warn('Failed to cache rules to localStorage:', e);
+                }
+
+                // 3. 构建树结构
+                const buildResult = this.buildTree(data);
+                this.state.rulesTree = buildResult.rootNodes;
+                this.state.conflictNodes = buildResult.conflictNodes;
+                this.state.conflictRelations = buildResult.conflictRelations;
+
                 // 4. 更新图片标签建议 (保持不变)
-                this.state.allKnownTags = data.keywords.map(k => k.keyword); 
-                this.filterAndUpdateDatalist(''); 
-                
+                this.state.allKnownTags = data.keywords.map(k => k.keyword);
+                this.filterAndUpdateDatalist('');
+
                 // 5. 渲染侧边栏 UI
-                this.renderRulesTree(); 
+                this.renderRulesTree();
 
                 console.log(`Rules tree loaded/updated to version ${data.version_id}`);
 
@@ -1854,10 +2819,9 @@ class MemeApp {
      * @returns {boolean} 操作是否仍然有效
      */
     checkIfActionStillValid(actionType, payload, newRulesTree) {
-        // **关键逻辑**：重新加载并构建服务器返回的 rulesTree，然后判断：
-        // 1. **修改/删除操作**：目标 Group/Keyword 是否在服务器的新数据中仍然存在。
-        // 1. 实现一个 findNode/findKeyword 函数来递归查找新树
+        // 实现一个 findNode 函数来递归查找新树
         const findNode = (nodes, id) => {
+            if (!nodes) return null;
             for (const node of nodes) {
                 if (node.id === id) return node;
                 const found = findNode(node.children, id);
@@ -1865,60 +2829,48 @@ class MemeApp {
             }
             return null;
         };
-        // 2. **添加操作**：目标 Group/Keyword 是否在服务器的新数据中已存在（如果已存在，则应避免重放）。
-        // 2. 根据操作类型进行检查
+
+        // 根据操作类型进行检查
         if (actionType.includes('group')) {
-            // 组操作：目标组是否还存在
-            const groupExists = findNode(newRulesTree, payload.group_id);
+            if (actionType.includes('/toggle') || actionType.includes('/delete')) {
+                // 启用/禁用或删除：目标组必须存在
+                return !!findNode(newRulesTree, payload.group_id);
+            }
             if (actionType.includes('/update') || actionType.includes('/remove')) {
-                // 如果是修改或删除，目标组必须存在才能重放
-                return !!groupExists;
+                // 修改或删除：目标组必须存在
+                return !!findNode(newRulesTree, payload.group_id);
             }
             if (actionType.includes('/add')) {
-                // 添加操作：假设服务器会处理重复命名，允许重放。
+                // 添加操作：假设服务器会处理重复命名，允许重放
                 return true;
-                }
-            // 对于 group/add，我们假设服务器会处理重复命名，允许重放。
+            }
         }
 
         if (actionType.includes('keyword')) {
             const groupNode = findNode(newRulesTree, payload.group_id);
             if (!groupNode) return false; // 目标组已不存在
-            
+
             const keywordExistsInGroup = groupNode.keywords.some(k => k.text === payload.keyword);
-            
+
             if (actionType.includes('/remove')) {
                 // 删除关键词操作：目标关键词必须存在才能重放
                 return keywordExistsInGroup;
             }
-            // 示例：如果用户要删除 Group A，但 Group A 已经被服务器删除，则操作无效（或成功，取决于业务定义）。
-            // 示例：如果用户要添加 Keyword X 到 Group B，但 Group B 已经被服务器删除，则操作无效。
-
-            // 由于缺乏完整的本地 CRUD 实现，我们在此处提供一个高度简化的框架：
             if (actionType.includes('/add')) {
-                // 对于添加操作，假设只要目标 Group 存在，操作就有效（服务器会处理重复添加）
+                // 添加操作：只要目标 Group 存在，操作就有效
                 return true;
             }
-            
-            if (actionType.includes('/update') || actionType.includes('/remove')) {
-                // 对于修改/删除操作，如果目标 ID/Keyword 依然存在，则重放有效。
-                // 简单检查关键参数是否存在
-                return !!payload.group_id || !!payload.keyword;
-            }
+        }
 
-            if (actionType.includes('hierarchy')) {
+        if (actionType.includes('hierarchy')) {
             // 层级操作：确保父子组都存在
             const parentExists = payload.parent_id === 0 || findNode(newRulesTree, payload.parent_id);
             const childExists = findNode(newRulesTree, payload.child_id);
-            
             return !!parentExists && !!childExists;
         }
 
-        // 默认返回 true，以便触发重试，让服务器进行最终判断。
-        return true; 
-
-        }
-
+        // 默认返回 true，以便触发重试，让服务器进行最终判断
+        return true;
     }
 
     /**
@@ -1961,12 +2913,12 @@ class MemeApp {
         const frag = document.createDocumentFragment();
 
         images.forEach(img => {
-            // Filter: Hide trash items unless we are in Trash Mode (explicitly searching for trash_bin)
+            // 前端过滤：非回收站模式下隐藏带 trash_bin 标签的图片
             const hasTrashTag = img.tags.includes('trash_bin') || img.is_trash;
             if (hasTrashTag && !this.state.isTrashMode) {
-                return; 
+                return;
             }
-            
+
             // 封装需要在事件委托中使用的图片数据，简化传输
             const infoForDelegation = JSON.stringify({
                 md5: img.md5,
@@ -2374,6 +3326,470 @@ class MemeApp {
         });
     }
 
+    /**
+     * [新增] 切换组的启用/禁用状态
+     * @param {object} node - 组节点对象
+     */
+    async toggleGroupEnabled(node) {
+        const newState = node.isEnabled ? 0 : 1;
+        const actionText = newState ? '启用' : '禁用';
+        const displayName = node.name || '[无名组]';
+
+        // 使用专用的启用/禁用接口
+        const payload = {
+            group_id: node.id,
+            is_enabled: newState
+        };
+
+        const action = {
+            url: '/api/rules/group/toggle',
+            method: 'POST',
+            type: 'group/toggle'
+        };
+
+        const result = await this.handleSave(action, payload);
+        if (result.success) {
+            // 状态变化后重新加载规则树数据
+            await this.loadRulesTree(true);
+            this.showToast(`组「${displayName}」已${actionText}`, 'success');
+        }
+    }
+
+    /**
+     * [重写] 彻底删除一个组（调用后端级联删除接口）
+     * @param {number} groupId - 组ID
+     */
+    async deleteGroup(groupId) {
+        // 在本地树中查找组信息用于显示
+        const findGroupRecursive = (nodes, id) => {
+            if (!nodes) return null;
+            for (const node of nodes) {
+                if (node.id == id) return node;
+                const found = findGroupRecursive(node.children, id);
+                if (found) return found;
+            }
+            return null;
+        };
+
+        const group = findGroupRecursive(this.state.rulesTree, groupId);
+        if (!group) {
+            this.showToast('组不存在', 'error');
+            return;
+        }
+
+        // 计算子组数量用于提示
+        const countDescendants = (node) => {
+            let count = 0;
+            if (node.children) {
+                count = node.children.length;
+                node.children.forEach(child => {
+                    count += countDescendants(child);
+                });
+            }
+            return count;
+        };
+
+        const descendantCount = countDescendants(group);
+        const displayName = group.name || '[无名组]';
+        const confirmMsg = descendantCount > 0
+            ? `确定要彻底删除组「${displayName}」吗？\n\n这将同时删除其 ${descendantCount} 个子组及所有关键词。\n此操作无法撤销！`
+            : `确定要彻底删除组「${displayName}」吗？\n\n此操作无法撤销！`;
+
+        if (!confirm(confirmMsg)) return;
+
+        const payload = {
+            group_id: groupId
+        };
+
+        const action = {
+            url: '/api/rules/group/delete',
+            method: 'POST',
+            type: 'group/delete'
+        };
+
+        const result = await this.handleSave(action, payload);
+        if (result.success) {
+            // 删除成功后重新加载规则树数据
+            await this.loadRulesTree(true);
+            const deletedCount = result.deleted_count || 1;
+            this.showToast(`已删除 ${deletedCount} 个组`, 'success');
+        }
+    }
+
+    // =========================================================================
+    // --- 批量编辑功能 ---
+    // =========================================================================
+
+    /**
+     * 切换批量编辑模式
+     */
+    toggleBatchMode() {
+        this.state.batchEditMode = !this.state.batchEditMode;
+
+        // 退出批量编辑模式时清空选中
+        if (!this.state.batchEditMode) {
+            this.state.selectedGroupIds.clear();
+        }
+
+        // 更新工具栏UI
+        this.updateBatchToolbarUI();
+
+        // 重新渲染规则树
+        this.renderRulesTree(true);
+    }
+
+    /**
+     * 切换单个组的选中状态
+     * @param {number} groupId - 组ID
+     */
+    toggleGroupSelection(groupId) {
+        if (this.state.selectedGroupIds.has(groupId)) {
+            this.state.selectedGroupIds.delete(groupId);
+        } else {
+            this.state.selectedGroupIds.add(groupId);
+        }
+
+        // 更新工具栏UI显示选中数量
+        this.updateBatchToolbarUI();
+
+        // 重新渲染规则树
+        this.renderRulesTree(true);
+    }
+
+    /**
+     * 全选/取消全选
+     */
+    toggleSelectAll() {
+        if (!this.state.rulesTree) return;
+
+        // 收集所有组ID
+        const allGroupIds = new Set();
+        const collectIds = (nodes) => {
+            nodes.forEach(node => {
+                allGroupIds.add(node.id);
+                collectIds(node.children);
+            });
+        };
+        collectIds(this.state.rulesTree);
+
+        // 判断当前是否全选
+        const isAllSelected = allGroupIds.size === this.state.selectedGroupIds.size;
+
+        if (isAllSelected) {
+            // 取消全选
+            this.state.selectedGroupIds.clear();
+        } else {
+            // 全选
+            this.state.selectedGroupIds = allGroupIds;
+        }
+
+        this.updateBatchToolbarUI();
+        this.renderRulesTree(true);
+    }
+
+    /**
+     * 更新批量编辑工具栏UI
+     */
+    updateBatchToolbarUI() {
+        const batchModeBtn = document.getElementById('batch-mode-btn');
+        const batchSelectedInfo = document.getElementById('batch-selected-info');
+        const batchActionsRow = document.getElementById('batch-actions-row');
+        const countSpan = document.getElementById('batch-selected-count');
+
+        // 更新批量按钮样式
+        if (batchModeBtn) {
+            if (this.state.batchEditMode) {
+                batchModeBtn.classList.add('bg-blue-600', 'text-white', 'border-blue-600');
+                batchModeBtn.classList.remove('bg-white', 'text-blue-600');
+            } else {
+                batchModeBtn.classList.remove('bg-blue-600', 'text-white', 'border-blue-600');
+                batchModeBtn.classList.add('bg-white', 'text-blue-600');
+            }
+        }
+
+        // 批量模式下显示已选数量和操作按钮行，否则隐藏
+        if (batchSelectedInfo) {
+            if (this.state.batchEditMode) {
+                batchSelectedInfo.classList.remove('hidden');
+            } else {
+                batchSelectedInfo.classList.add('hidden');
+            }
+        }
+
+        // 控制第二行操作按钮的显示/隐藏
+        if (batchActionsRow) {
+            if (this.state.batchEditMode) {
+                batchActionsRow.classList.remove('hidden');
+            } else {
+                batchActionsRow.classList.add('hidden');
+            }
+        }
+
+        // 更新选中数量
+        if (countSpan) {
+            countSpan.textContent = this.state.selectedGroupIds.size;
+        }
+    }
+
+    /**
+     * 批量启用选中的组
+     */
+    async batchEnableGroups() {
+        const ids = Array.from(this.state.selectedGroupIds);
+        if (ids.length === 0) {
+            this.showToast('请先选择要操作的组', 'error');
+            return;
+        }
+
+        if (!confirm(`确定要启用选中的 ${ids.length} 个组吗？`)) return;
+
+        const action = { url: '/api/rules/group/batch', method: 'POST', type: 'group/batch' };
+        const payload = { group_ids: ids, action: 'enable' };
+        const result = await this.handleSave(action, payload);
+
+        if (result.success) {
+            this.state.selectedGroupIds.clear();
+            this.updateBatchToolbarUI();
+            this.showToast(`已启用 ${result.affected_count || ids.length} 个组`, 'success');
+        }
+    }
+
+    /**
+     * 批量禁用选中的组
+     */
+    async batchDisableGroups() {
+        const ids = Array.from(this.state.selectedGroupIds);
+        if (ids.length === 0) {
+            this.showToast('请先选择要操作的组', 'error');
+            return;
+        }
+
+        if (!confirm(`确定要禁用选中的 ${ids.length} 个组吗？`)) return;
+
+        const action = { url: '/api/rules/group/batch', method: 'POST', type: 'group/batch' };
+        const payload = { group_ids: ids, action: 'disable' };
+        const result = await this.handleSave(action, payload);
+
+        if (result.success) {
+            this.state.selectedGroupIds.clear();
+            this.updateBatchToolbarUI();
+            this.showToast(`已禁用 ${result.affected_count || ids.length} 个组`, 'success');
+        }
+    }
+
+    /**
+     * 批量删除选中的组
+     */
+    async batchDeleteGroups() {
+        const ids = Array.from(this.state.selectedGroupIds);
+        if (ids.length === 0) {
+            this.showToast('请先选择要删除的组', 'error');
+            return;
+        }
+
+        if (!confirm(`确定要彻底删除选中的 ${ids.length} 个组吗？\n\n⚠️ 此操作将递归删除所有子组和关键词，无法撤销！`)) return;
+
+        const action = { url: '/api/rules/group/batch', method: 'POST', type: 'group/batch' };
+        const payload = { group_ids: ids, action: 'delete' };
+        const result = await this.handleSave(action, payload);
+
+        if (result.success) {
+            this.state.selectedGroupIds.clear();
+            this.updateBatchToolbarUI();
+            this.showToast(`已删除 ${result.affected_count || ids.length} 个组`, 'success');
+        }
+    }
+
+    /**
+     * 更新规则树搜索建议
+     */
+    updateTreeSearchSuggestions() {
+        const datalist = document.getElementById('tree-suggestions');
+        if (!datalist) return;
+
+        datalist.innerHTML = '';
+
+        // 收集所有组名和关键词
+        const suggestions = new Set();
+
+        if (this.state.rulesTree) {
+            this.state.rulesTree.forEach(group => {
+                suggestions.add(group.name);
+                group.keywords.forEach(kw => suggestions.add(kw.text));
+            });
+        }
+
+        // 添加到datalist
+        Array.from(suggestions).sort().forEach(text => {
+            const option = document.createElement('option');
+            option.value = text;
+            datalist.appendChild(option);
+        });
+    }
+
+    /**
+     * 筛选并高亮显示规则树节点
+     * @param {string} searchText - 搜索关键词
+     */
+    filterRulesTree(searchText) {
+        const container = document.getElementById('rules-tree-container');
+        if (!container) return;
+
+        const normalizedSearch = searchText.toLowerCase().trim();
+
+        if (!normalizedSearch) {
+            // 清空搜索：显示所有节点
+            container.querySelectorAll('.group-node').forEach(card => {
+                card.style.display = '';
+                card.classList.remove('ring-2', 'ring-green-400');
+            });
+            return;
+        }
+
+        let matchCount = 0;
+
+        container.querySelectorAll('.group-node').forEach(card => {
+            const groupId = card.dataset.id;
+            const groupName = card.dataset.name;
+
+            if (!groupId) {
+                card.style.display = 'none';
+                return;
+            }
+
+            // 检查组名或关键词是否匹配
+            const groupNameMatch = groupName && groupName.toLowerCase().includes(normalizedSearch);
+
+            // 检查关键词匹配
+            const keywordElements = card.querySelectorAll('.keyword-capsule');
+            const keywordMatch = Array.from(keywordElements).some(el =>
+                el.textContent.toLowerCase().includes(normalizedSearch)
+            );
+
+            if (groupNameMatch || keywordMatch) {
+                card.style.display = '';
+                card.classList.add('ring-2', 'ring-green-400');
+                matchCount++;
+
+                // 滚动到第一个匹配项
+                if (matchCount === 1) {
+                    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }
+            } else {
+                card.style.display = 'none';
+                card.classList.remove('ring-2', 'ring-green-400');
+            }
+        });
+
+        if (matchCount === 0) {
+            this.showToast('未找到匹配项', 'info');
+        }
+    }
+
+    /**
+     * 导出所有数据为JSON文件
+     */
+    async exportAllData() {
+        try {
+            this.showToast('正在导出数据...', 'info');
+
+            const response = await fetch('/api/export/all');
+            const data = await response.json();
+
+            // 创建下载链接
+            const dataStr = JSON.stringify(data, null, 2);
+            const dataBlob = new Blob([dataStr], { type: 'application/json' });
+            const url = URL.createObjectURL(dataBlob);
+
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = `bqbq_export_${Date.now()}.json`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(url);
+
+            this.showToast(`导出成功！（${data.images.length} 张图片）`, 'success');
+
+        } catch (error) {
+            console.error('Export error:', error);
+            this.showToast(`导出失败：${error.message}`, 'error');
+        }
+    }
+
+    /**
+     * 从JSON文件导入数据
+     * @param {File} file - JSON文件
+     */
+    async importAllData(file) {
+        try {
+            this.showToast('正在导入数据...', 'info');
+
+            const fileContent = await file.text();
+            const data = JSON.parse(fileContent);
+
+            const response = await fetch('/api/import/all', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+            });
+
+            const result = await response.json();
+
+            if (result.success) {
+                this.showToast(
+                    `导入成功！新增 ${result.imported_images} 张，跳过 ${result.skipped_images} 张`,
+                    'success'
+                );
+
+                // 重新加载规则树和搜索结果
+                await this.loadRulesTree(true);
+                this.resetSearch();
+            } else {
+                this.showToast(`导入失败：${result.error}`, 'error');
+            }
+
+        } catch (error) {
+            console.error('Import error:', error);
+            this.showToast(`导入失败：${error.message}`, 'error');
+        }
+    }
+
+    /**
+     * 计算文件的MD5哈希值
+     * @param {File} file - 要计算的文件
+     * @returns {Promise<string>} MD5哈希值
+     */
+    async calculateMD5(file) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            const spark = new SparkMD5.ArrayBuffer();
+
+            reader.onload = (e) => {
+                spark.append(e.target.result);
+                const md5 = spark.end();
+                resolve(md5);
+            };
+
+            reader.onerror = () => reject(new Error('文件读取失败'));
+            reader.readAsArrayBuffer(file);
+        });
+    }
+
+    /**
+     * 检查MD5是否已存在
+     * @param {string} md5 - MD5哈希值
+     * @returns {Promise<object>} {exists: boolean, filename: string}
+     */
+    async checkMD5Exists(md5) {
+        const response = await fetch('/api/check_md5', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ md5 })
+        });
+        return await response.json();
+    }
+
     async handleUpload(files) {
         if (files.length === 0) return;
         const btn = this.dom.fabUpload;
@@ -2384,15 +3800,44 @@ class MemeApp {
 
         try {
             for (let file of files) {
-                const fd = new FormData();
-                fd.append('file', file);
-                await fetch('/api/upload', { method: 'POST', body: fd });
+                // 1. 计算MD5
+                const md5 = await this.calculateMD5(file);
+                console.log(`File MD5: ${md5}`);
+
+                // 2. 检查是否已存在
+                const checkResult = await this.checkMD5Exists(md5);
+
+                if (checkResult.exists) {
+                    // 重复文件：仅刷新时间戳
+                    this.showToast(`图片已存在：${file.name}（已更新时间戳）`, 'info');
+                    continue;
+                }
+
+                // 3. 上传新文件
+                const formData = new FormData();
+                formData.append('file', file);
+
+                const response = await fetch('/api/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    console.log('Upload successful:', result.msg);
+                    this.showToast(`上传成功：${file.name}`, 'success');
+                } else {
+                    console.error('Upload failed:', result.error);
+                    this.showToast(`上传失败：${result.error}`, 'error');
+                }
             }
+
+            // 完成后刷新搜索
             this.resetSearch();
         } catch (e) {
             console.error("Upload failed", e);
-            // Replaced alert with console error as per instructions
-            console.error("上传失败，请重试"); 
+            this.showToast(`上传出错：${e.message}`, 'error');
         } finally {
             btn.innerHTML = originalContent;
             lucide.createIcons();

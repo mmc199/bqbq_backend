@@ -121,15 +121,20 @@ class MemeService:
         }
     
     @staticmethod
-    def add_group(group_name):
+    def add_group(group_name, is_enabled=1):
         """创建一个新组"""
         def write_func(conn):
             # 获取当前最大的 group_id 并 +1 作为新 ID (简单实现)
             max_id = conn.execute("SELECT MAX(group_id) FROM search_groups").fetchone()[0]
             new_id = (max_id or 0) + 1
-            
-            conn.execute("INSERT INTO search_groups (group_id, group_name) VALUES (?, ?)", 
-                        (new_id, group_name))
+
+            # 确保 group_name 不为空
+            safe_name = group_name.strip() if group_name else ''
+            if not safe_name:
+                raise ValueError("group_name cannot be empty")
+
+            conn.execute("INSERT INTO search_groups (group_id, group_name, is_enabled) VALUES (?, ?, ?)",
+                        (new_id, safe_name, is_enabled))
             return new_id # 返回新 ID 供前端使用
         return write_func
 
@@ -137,8 +142,51 @@ class MemeService:
     def update_group(group_id, group_name, is_enabled):
         """更新组名或软删状态"""
         def write_func(conn):
-            conn.execute("UPDATE search_groups SET group_name=?, is_enabled=? WHERE group_id=?", 
+            conn.execute("UPDATE search_groups SET group_name=?, is_enabled=? WHERE group_id=?",
                         (group_name, is_enabled, group_id))
+        return write_func
+
+    @staticmethod
+    def toggle_group_enabled(group_id, is_enabled):
+        """仅切换组的启用/禁用状态（软删除/恢复）"""
+        def write_func(conn):
+            conn.execute("UPDATE search_groups SET is_enabled=? WHERE group_id=?",
+                        (is_enabled, group_id))
+        return write_func
+
+    @staticmethod
+    def delete_group_cascade(group_id):
+        """
+        彻底删除一个组及其所有子组、关键词和层级关系（递归删除）
+        """
+        def write_func(conn):
+            # 递归收集所有需要删除的组ID（包括子组）
+            def collect_all_descendants(gid):
+                ids = [gid]
+                children = conn.execute(
+                    "SELECT child_id FROM search_hierarchy WHERE parent_id=?",
+                    (gid,)
+                ).fetchall()
+                for child in children:
+                    ids.extend(collect_all_descendants(child['child_id']))
+                return ids
+
+            all_group_ids = collect_all_descendants(group_id)
+
+            # 删除所有相关的关键词
+            for gid in all_group_ids:
+                conn.execute("DELETE FROM search_keywords WHERE group_id=?", (gid,))
+
+            # 删除所有相关的层级关系（作为父或子）
+            for gid in all_group_ids:
+                conn.execute("DELETE FROM search_hierarchy WHERE parent_id=? OR child_id=?", (gid, gid))
+
+            # 删除所有组
+            for gid in all_group_ids:
+                conn.execute("DELETE FROM search_groups WHERE group_id=?", (gid,))
+
+            return len(all_group_ids)  # 返回删除的组数量
+
         return write_func
     
     @staticmethod
@@ -195,9 +243,11 @@ class MemeService:
             if parent_id == child_id:
                 raise ValueError("Cannot link group to itself")
 
-            # 检查是否会形成环路（关键修复）
-            if MemeService.has_hierarchy_cycle(conn, parent_id, child_id):
-                raise ValueError("Cannot create cycle in hierarchy")
+            # parent_id = 0 表示设置为根节点,无需检测循环
+            if parent_id != 0:
+                # 检查是否会形成环路（关键修复）
+                if MemeService.has_hierarchy_cycle(conn, parent_id, child_id):
+                    raise ValueError("Cannot create cycle in hierarchy")
 
             # 插入新关系，忽略已存在
             conn.execute("INSERT OR IGNORE INTO search_hierarchy (parent_id, child_id) VALUES (?, ?)",
@@ -290,34 +340,168 @@ class MemeService:
     def add_keyword_to_group(group_id, keyword):
         """用于 try_write 包装的示例写操作"""
         def write_func(conn):
-            conn.execute("INSERT OR REPLACE INTO search_keywords (keyword, group_id) VALUES (?, ?)", 
+            conn.execute("INSERT OR REPLACE INTO search_keywords (keyword, group_id) VALUES (?, ?)",
                         (keyword, group_id))
+        return write_func
+
+    @staticmethod
+    def batch_toggle_groups(group_ids, is_enabled):
+        """批量启用/禁用组"""
+        def write_func(conn):
+            if not group_ids:
+                return 0
+            placeholders = ','.join(['?'] * len(group_ids))
+            conn.execute(
+                f"UPDATE search_groups SET is_enabled=? WHERE group_id IN ({placeholders})",
+                [is_enabled] + list(group_ids)
+            )
+            return len(group_ids)
+        return write_func
+
+    @staticmethod
+    def batch_delete_groups(group_ids):
+        """批量删除组及其所有子组、关键词和层级关系（递归删除）"""
+        def write_func(conn):
+            if not group_ids:
+                return 0
+
+            # 递归收集所有需要删除的组ID（包括子组）
+            def collect_all_descendants(gid):
+                ids = [gid]
+                children = conn.execute(
+                    "SELECT child_id FROM search_hierarchy WHERE parent_id=?",
+                    (gid,)
+                ).fetchall()
+                for child in children:
+                    ids.extend(collect_all_descendants(child['child_id']))
+                return ids
+
+            # 收集所有要删除的组ID
+            all_group_ids = []
+            for gid in group_ids:
+                all_group_ids.extend(collect_all_descendants(gid))
+
+            # 去重
+            all_group_ids = list(set(all_group_ids))
+
+            if not all_group_ids:
+                return 0
+
+            placeholders = ','.join(['?'] * len(all_group_ids))
+
+            # 删除所有相关的关键词
+            conn.execute(f"DELETE FROM search_keywords WHERE group_id IN ({placeholders})", all_group_ids)
+
+            # 删除所有相关的层级关系（作为父或子）
+            conn.execute(
+                f"DELETE FROM search_hierarchy WHERE parent_id IN ({placeholders}) OR child_id IN ({placeholders})",
+                all_group_ids + all_group_ids
+            )
+
+            # 删除所有组
+            conn.execute(f"DELETE FROM search_groups WHERE group_id IN ({placeholders})", all_group_ids)
+
+            return len(all_group_ids)
+
+        return write_func
+
+    @staticmethod
+    def batch_move_hierarchy(parent_id, child_ids):
+        """
+        批量移动多个组到同一个父节点
+        - 先移除每个子组的所有现有父关系
+        - 再建立新的父子关系（如果 parent_id != 0）
+
+        Args:
+            parent_id: 目标父组 ID（0 表示移动到根节点）
+            child_ids: 要移动的子组 ID 列表
+
+        Returns:
+            write_func: 用于 try_write 的写操作函数
+        """
+        def write_func(conn):
+            if not child_ids:
+                return {"moved": 0, "errors": []}
+
+            moved_count = 0
+            errors = []
+
+            for child_id in child_ids:
+                try:
+                    # 跳过自引用
+                    if parent_id == child_id:
+                        errors.append({"child_id": child_id, "error": "Cannot link group to itself"})
+                        continue
+
+                    # 检查循环引用（parent_id != 0 时）
+                    if parent_id != 0:
+                        if MemeService.has_hierarchy_cycle(conn, parent_id, child_id):
+                            errors.append({"child_id": child_id, "error": "Would create cycle"})
+                            continue
+
+                    # 移除所有现有父关系
+                    conn.execute("DELETE FROM search_hierarchy WHERE child_id=?", (child_id,))
+
+                    # 建立新的父子关系（如果不是移动到根节点）
+                    if parent_id != 0:
+                        conn.execute(
+                            "INSERT OR IGNORE INTO search_hierarchy (parent_id, child_id) VALUES (?, ?)",
+                            (parent_id, child_id)
+                        )
+
+                    moved_count += 1
+
+                except Exception as e:
+                    errors.append({"child_id": child_id, "error": str(e)})
+
+            return {"moved": moved_count, "errors": errors}
+
         return write_func        
 
 
 
     @staticmethod
     def search(params):
-        # ... (保持不变) ...
+        """
+        搜索图片
+        - keywords: 二维数组，每个子数组是一个标签膨胀后的关键词列表（子数组内OR，子数组间AND）
+        - excludes: 二维数组，每个子数组是一个排除标签膨胀后的关键词列表（子数组内OR，子数组间AND排除）
+        """
         offset = params.get('offset', 0)
         limit = params.get('limit', 50)
-        keywords = params.get('keywords', [])
-        excludes = params.get('excludes', [])
+        keywords_groups = params.get('keywords', [])  # 二维数组: [[kw1a, kw1b], [kw2a, kw2b]]
+        excludes_groups = params.get('excludes', [])  # 二维数组: [[ex1a, ex1b], [ex2a, ex2b]]
         sort_by = params.get('sort_by', 'date_desc')
 
         where_clauses = ["1=1"]
         sql_params = []
 
-        for kw in keywords:
-            where_clauses.append("f.tags_text LIKE ?")
-            sql_params.append(f"%{kw}%")
-        
-        for ex in excludes:
-            where_clauses.append("f.tags_text NOT LIKE ?")
-            sql_params.append(f"%{ex}%")
+        # 处理包含关键词组（AND 关系，每组内部是 OR 关系）
+        for kw_group in keywords_groups:
+            if not kw_group:
+                continue
+            # 每个组内的关键词用 OR 连接
+            or_conditions = []
+            for kw in kw_group:
+                or_conditions.append("f.tags_text LIKE ?")
+                sql_params.append(f"%{kw}%")
+            if or_conditions:
+                where_clauses.append(f"({' OR '.join(or_conditions)})")
+
+        # 处理排除关键词组（AND 排除，每组内部是 OR 关系 -> 任一命中即排除）
+        for ex_group in excludes_groups:
+            if not ex_group:
+                continue
+            # 每个组内的关键词用 OR 连接，整体取反
+            or_conditions = []
+            for ex in ex_group:
+                or_conditions.append("f.tags_text LIKE ?")
+                sql_params.append(f"%{ex}%")
+            if or_conditions:
+                where_clauses.append(f"NOT ({' OR '.join(or_conditions)})")
 
         where_sql = " WHERE " + " AND ".join(where_clauses)
-        
+
         order_sql = "ORDER BY i.created_at DESC"
         if sort_by == 'date_desc': order_sql = "ORDER BY i.created_at DESC"
         elif sort_by == 'date_asc': order_sql = "ORDER BY i.created_at ASC"
@@ -327,16 +511,16 @@ class MemeService:
         elif sort_by == 'resolution_asc': order_sql = "ORDER BY i.height ASC, i.width ASC"
 
         query = f"""
-            SELECT i.*, f.tags_text 
-            FROM images i 
+            SELECT i.*, f.tags_text
+            FROM images i
             LEFT JOIN images_fts f ON i.md5 = f.md5
             {where_sql}
             {order_sql}
             LIMIT ? OFFSET ?
         """
         count_query = f"""
-            SELECT COUNT(*) 
-            FROM images i 
+            SELECT COUNT(*)
+            FROM images i
             LEFT JOIN images_fts f ON i.md5 = f.md5
             {where_sql}
         """
@@ -420,41 +604,164 @@ class MemeService:
         blob = file_obj.read()
         md5 = hashlib.md5(blob).hexdigest()
         file_obj.seek(0)
-        
+
         with MemeService.get_conn() as conn:
-            if conn.execute("SELECT 1 FROM images WHERE md5=?", (md5,)).fetchone():
-                return False, "Duplicate image"
-                
+            existing = conn.execute("SELECT 1 FROM images WHERE md5=?", (md5,)).fetchone()
+            if existing:
+                # 重复图片：更新上传时间
+                conn.execute("UPDATE images SET created_at=? WHERE md5=?", (time.time(), md5))
+                conn.commit()
+                return False, "Duplicate image (timestamp refreshed)"
+
             ext = os.path.splitext(file_obj.filename)[1].lower() or '.jpg'
             filename = f"{md5}{ext}"
-            
+
             # 1. 保存原图
             original_path = os.path.join(FOLDERS['img'], filename)
             file_obj.save(original_path)
-            
+
             # 2. 获取原图尺寸 (为了写入数据库)
             try:
                 with Image.open(original_path) as img:
                     w, h = img.size
             except:
                 w, h = 0, 0
-            
+
             # 3. 生成缩略图 (强制使用 .jpg)
             thumb_filename = f"{md5}_thumbnail.jpg"
             thumb_path = os.path.join(FOLDERS['thumb'], thumb_filename)
             MemeService._create_thumbnail_file(original_path, thumb_path)
-            
+
             # 4. 写入数据库
             conn.execute("INSERT INTO images (md5, filename, created_at, width, height, size) VALUES (?, ?, ?, ?, ?, ?)",
                          (md5, filename, time.time(), w, h, len(blob)))
             conn.commit()
-            
+
             MemeService.update_index(md5, [])
-            
+
         return True, md5
+
+    @staticmethod
+    def scan_and_import_folder():
+        """
+        启动时扫描 meme_images 文件夹，自动导入未在数据库中的图片。
+        处理文件验证、重命名、去重、缩略图生成。
+        """
+        import glob
+
+        print("[Folder Scan] Starting automatic import from meme_images folder...")
+
+        img_folder = FOLDERS['img']
+        if not os.path.exists(img_folder):
+            print(f"[Folder Scan] Image folder not found: {img_folder}")
+            return
+
+        # 支持的图片格式
+        supported_formats = ['*.jpg', '*.jpeg', '*.png', '*.gif', '*.webp', '*.bmp']
+
+        imported_count = 0
+        skipped_count = 0
+        error_count = 0
+
+        with MemeService.get_conn() as conn:
+            for pattern in supported_formats:
+                file_pattern = os.path.join(img_folder, pattern)
+                files = glob.glob(file_pattern, recursive=False)
+
+                # 也扫描大写扩展名
+                file_pattern_upper = os.path.join(img_folder, pattern.upper())
+                files += glob.glob(file_pattern_upper, recursive=False)
+
+                for file_path in files:
+                    try:
+                        # 计算文件 MD5
+                        with open(file_path, 'rb') as f:
+                            file_data = f.read()
+                            md5 = hashlib.md5(file_data).hexdigest()
+
+                        # 检查数据库是否已存在
+                        existing = conn.execute("SELECT filename FROM images WHERE md5=?", (md5,)).fetchone()
+
+                        if existing:
+                            # 已存在：检查文件名是否需要标准化
+                            current_filename = os.path.basename(file_path)
+                            expected_filename = existing['filename']
+
+                            if current_filename != expected_filename:
+                                # 重命名为标准格式
+                                new_path = os.path.join(img_folder, expected_filename)
+                                if not os.path.exists(new_path):
+                                    os.rename(file_path, new_path)
+                                    print(f"[Folder Scan] Renamed: {current_filename} -> {expected_filename}")
+
+                            skipped_count += 1
+                            continue
+
+                        # 新文件：导入到数据库
+                        ext = os.path.splitext(file_path)[1].lower() or '.jpg'
+                        standard_filename = f"{md5}{ext}"
+                        standard_path = os.path.join(img_folder, standard_filename)
+
+                        # 重命名为标准格式（如果尚未标准化）
+                        if file_path != standard_path:
+                            if os.path.exists(standard_path):
+                                # 目标文件已存在，删除当前重复文件
+                                os.remove(file_path)
+                                print(f"[Folder Scan] Removed duplicate: {os.path.basename(file_path)}")
+                                skipped_count += 1
+                                continue
+                            else:
+                                os.rename(file_path, standard_path)
+                                print(f"[Folder Scan] Renamed: {os.path.basename(file_path)} -> {standard_filename}")
+
+                        # 获取图片尺寸
+                        try:
+                            with Image.open(standard_path) as img:
+                                w, h = img.size
+                        except Exception as e:
+                            print(f"[Folder Scan] Failed to read image dimensions for {standard_filename}: {e}")
+                            w, h = 0, 0
+
+                        # 生成缩略图
+                        thumb_filename = f"{md5}_thumbnail.jpg"
+                        thumb_path = os.path.join(FOLDERS['thumb'], thumb_filename)
+                        success = MemeService._create_thumbnail_file(standard_path, thumb_path)
+
+                        if not success:
+                            print(f"[Folder Scan] Warning: Thumbnail generation failed for {standard_filename}")
+
+                        # 写入数据库
+                        file_size = len(file_data)
+                        conn.execute(
+                            "INSERT INTO images (md5, filename, created_at, width, height, size) VALUES (?, ?, ?, ?, ?, ?)",
+                            (md5, standard_filename, os.path.getmtime(standard_path), w, h, file_size)
+                        )
+
+                        # 初始化空标签索引
+                        MemeService.update_index(md5, [])
+
+                        imported_count += 1
+                        print(f"[Folder Scan] Imported: {standard_filename} ({w}x{h}, {file_size} bytes)")
+
+                    except Exception as e:
+                        error_count += 1
+                        print(f"[Folder Scan] Error processing {file_path}: {e}")
+                        import traceback
+                        traceback.print_exc()
+
+            conn.commit()
+
+        print(f"\n[Folder Scan] Summary:")
+        print(f"  - Imported: {imported_count}")
+        print(f"  - Skipped (already in DB): {skipped_count}")
+        print(f"  - Errors: {error_count}")
+        print(f"[Folder Scan] Automatic import completed.\n")
 
 # Initialize DB
 MemeService.init_db()
+
+# Scan and import existing images from folder
+MemeService.scan_and_import_folder()
 
 # --- Routes ---
 
@@ -541,21 +848,32 @@ def api_add_keyword():
 @app.route('/api/rules/group/add', methods=['POST'])
 def api_add_group():
     data = request.json
+    print(f"[DEBUG] api_add_group received data: {data}")  # 调试日志
+
     base_version = data.get('base_version')
     client_id = data.get('client_id')
     group_name = data.get('group_name')
+    is_enabled = data.get('is_enabled', 1)  # 默认启用
+
+    print(f"[DEBUG] Extracted: base_version={base_version}, client_id={client_id}, group_name='{group_name}', is_enabled={is_enabled}")  # 调试日志
 
     if None in [base_version, client_id, group_name]:
+        print(f"[DEBUG] Missing parameters! base_version={base_version}, client_id={client_id}, group_name={group_name}")
         return jsonify({"success": False, "error": "Missing parameters"}), 400
 
+    # 检查 group_name 是否为空字符串
+    if not group_name or not group_name.strip():
+        print(f"[DEBUG] Empty group_name!")
+        return jsonify({"success": False, "error": "group_name cannot be empty"}), 400
+
     result = MemeService.try_write(
-        base_version, client_id, 
-        MemeService.add_group(group_name)
+        base_version, client_id,
+        MemeService.add_group(group_name, is_enabled)
     )
 
     if result['status'] == 409:
         return jsonify(result), 409
-    
+
     return jsonify({"success": result['success'], "version_id": result.get('version_id'), "new_id": result.get('new_id')})
 
 @app.route('/api/rules/group/update', methods=['POST'])
@@ -577,8 +895,108 @@ def api_update_group():
 
     if result['status'] == 409:
         return jsonify(result), 409
-    
+
     return jsonify({"success": result['success'], "version_id": result.get('version_id')})
+
+
+@app.route('/api/rules/group/toggle', methods=['POST'])
+def api_toggle_group():
+    """专用接口：切换组的启用/禁用状态（软删除/恢复）"""
+    data = request.json
+    base_version = data.get('base_version')
+    client_id = data.get('client_id')
+    group_id = data.get('group_id')
+    is_enabled = data.get('is_enabled')
+
+    if None in [base_version, client_id, group_id, is_enabled]:
+        return jsonify({"success": False, "error": "Missing parameters"}), 400
+
+    result = MemeService.try_write(
+        base_version, client_id,
+        MemeService.toggle_group_enabled(group_id, is_enabled)
+    )
+
+    if result['status'] == 409:
+        return jsonify(result), 409
+
+    return jsonify({"success": result['success'], "version_id": result.get('version_id')})
+
+
+@app.route('/api/rules/group/delete', methods=['POST'])
+def api_delete_group():
+    """彻底删除一个组及其所有子组、关键词和层级关系"""
+    data = request.json
+    base_version = data.get('base_version')
+    client_id = data.get('client_id')
+    group_id = data.get('group_id')
+
+    if None in [base_version, client_id, group_id]:
+        return jsonify({"success": False, "error": "Missing parameters"}), 400
+
+    result = MemeService.try_write(
+        base_version, client_id,
+        MemeService.delete_group_cascade(group_id)
+    )
+
+    if result['status'] == 409:
+        return jsonify(result), 409
+
+    return jsonify({
+        "success": result['success'],
+        "version_id": result.get('version_id'),
+        "deleted_count": result.get('new_id')  # new_id 存储的是删除的组数量
+    })
+
+
+@app.route('/api/rules/group/batch', methods=['POST'])
+def api_batch_group():
+    """
+    批量操作组（启用/禁用/删除）
+    Request: {
+        "group_ids": [1, 2, 3],
+        "action": "enable" | "disable" | "delete",
+        "base_version": 42,
+        "client_id": "xxx"
+    }
+    Response: {
+        "success": true,
+        "version_id": 43,
+        "affected_count": 3
+    }
+    """
+    data = request.json
+    base_version = data.get('base_version')
+    client_id = data.get('client_id')
+    group_ids = data.get('group_ids', [])
+    action = data.get('action')
+
+    if None in [base_version, client_id, action]:
+        return jsonify({"success": False, "error": "Missing parameters"}), 400
+
+    if not isinstance(group_ids, list) or len(group_ids) == 0:
+        return jsonify({"success": False, "error": "group_ids must be a non-empty array"}), 400
+
+    if action not in ['enable', 'disable', 'delete']:
+        return jsonify({"success": False, "error": "Invalid action. Must be 'enable', 'disable', or 'delete'"}), 400
+
+    # 根据 action 选择对应的写操作
+    if action == 'enable':
+        write_func = MemeService.batch_toggle_groups(group_ids, 1)
+    elif action == 'disable':
+        write_func = MemeService.batch_toggle_groups(group_ids, 0)
+    else:  # delete
+        write_func = MemeService.batch_delete_groups(group_ids)
+
+    result = MemeService.try_write(base_version, client_id, write_func)
+
+    if result['status'] == 409:
+        return jsonify(result), 409
+
+    return jsonify({
+        "success": result['success'],
+        "version_id": result.get('version_id'),
+        "affected_count": result.get('new_id', len(group_ids))  # new_id 存储返回值（受影响数量）
+    })
 
 
 @app.route('/api/rules/keyword/remove', methods=['POST'])
@@ -641,14 +1059,64 @@ def api_remove_hierarchy():
         return jsonify({"success": False, "error": "Missing parameters"}), 400
 
     result = MemeService.try_write(
-        base_version, client_id, 
+        base_version, client_id,
         MemeService.remove_hierarchy(parent_id, child_id)
     )
 
     if result['status'] == 409:
         return jsonify(result), 409
-    
+
     return jsonify({"success": result['success'], "version_id": result.get('version_id')})
+
+
+@app.route('/api/rules/hierarchy/batch_move', methods=['POST'])
+def api_batch_move_hierarchy():
+    """
+    批量移动多个组到同一个父节点
+
+    Request: {
+        "parent_id": 123,      // 目标父组 ID（0 表示移动到根节点）
+        "child_ids": [1, 2, 3], // 要移动的子组 ID 列表
+        "base_version": 42,
+        "client_id": "xxx"
+    }
+
+    Response: {
+        "success": true,
+        "version_id": 43,
+        "moved": 3,
+        "errors": []
+    }
+    """
+    data = request.json
+    base_version = data.get('base_version')
+    client_id = data.get('client_id')
+    parent_id = data.get('parent_id')
+    child_ids = data.get('child_ids', [])
+
+    if None in [base_version, client_id, parent_id]:
+        return jsonify({"success": False, "error": "Missing parameters"}), 400
+
+    if not isinstance(child_ids, list) or len(child_ids) == 0:
+        return jsonify({"success": False, "error": "child_ids must be a non-empty array"}), 400
+
+    result = MemeService.try_write(
+        base_version, client_id,
+        MemeService.batch_move_hierarchy(parent_id, child_ids)
+    )
+
+    if result['status'] == 409:
+        return jsonify(result), 409
+
+    # 从 new_id 中提取移动结果
+    move_result = result.get('new_id', {"moved": 0, "errors": []})
+
+    return jsonify({
+        "success": result['success'],
+        "version_id": result.get('version_id'),
+        "moved": move_result.get('moved', 0),
+        "errors": move_result.get('errors', [])
+    })
 
 @app.route('/api/meta/tags')
 def api_tags():
@@ -656,6 +1124,167 @@ def api_tags():
         rows = conn.execute("SELECT name FROM tags_dict ORDER BY use_count DESC LIMIT 1000")
         tags = [r[0] for r in rows]
     return jsonify(tags)
+
+@app.route('/api/check_md5', methods=['POST'])
+def api_check_md5():
+    """
+    检查MD5是否已存在，用于前端上传前预检查。
+    Request: {"md5": "abc123..."}
+    Response: {"exists": true/false, "filename": "..." (if exists)}
+    """
+    data = request.json
+    md5 = data.get('md5')
+
+    if not md5:
+        return jsonify({"error": "Missing md5 parameter"}), 400
+
+    with MemeService.get_conn() as conn:
+        row = conn.execute("SELECT filename FROM images WHERE md5=?", (md5,)).fetchone()
+
+        if row:
+            return jsonify({"exists": True, "filename": row['filename']})
+        else:
+            return jsonify({"exists": False})
+
+@app.route('/api/export/all', methods=['GET'])
+def api_export_all():
+    """
+    导出所有数据为JSON（图片标签 + 规则树）。
+    注意：不包含图片文件本身，只包含元数据。
+    """
+    with MemeService.get_conn() as conn:
+        # 1. 导出图片和标签
+        images_rows = conn.execute("""
+            SELECT i.md5, i.filename, i.created_at, i.width, i.height, i.size, f.tags_text
+            FROM images i
+            LEFT JOIN images_fts f ON i.md5 = f.md5
+        """).fetchall()
+
+        images_data = []
+        for row in images_rows:
+            tags_text = row['tags_text'] if row['tags_text'] else ""
+            tags = tags_text.split(' ') if tags_text else []
+            images_data.append({
+                "md5": row['md5'],
+                "filename": row['filename'],
+                "created_at": row['created_at'],
+                "width": row['width'],
+                "height": row['height'],
+                "size": row['size'],
+                "tags": tags
+            })
+
+        # 2. 导出规则树
+        rules_data = MemeService.get_rules_data(conn)
+
+        # 3. 导出标签字典
+        tags_dict_rows = conn.execute("SELECT name, use_count FROM tags_dict").fetchall()
+        tags_dict = [{"name": r['name'], "use_count": r['use_count']} for r in tags_dict_rows]
+
+        export_data = {
+            "export_time": time.time(),
+            "version": "1.0",
+            "images": images_data,
+            "rules": rules_data,
+            "tags_dict": tags_dict
+        }
+
+        return jsonify(export_data)
+
+@app.route('/api/import/all', methods=['POST'])
+def api_import_all():
+    """
+    导入JSON数据（图片标签 + 规则树）。
+    警告：这会覆盖现有规则树数据！图片数据会合并（相同MD5跳过）。
+    """
+    data = request.json
+
+    if not data or 'images' not in data or 'rules' not in data:
+        return jsonify({"success": False, "error": "Invalid import data format"}), 400
+
+    try:
+        with MemeService.get_conn() as conn:
+            imported_images = 0
+            skipped_images = 0
+
+            # 1. 导入图片标签数据
+            for img in data.get('images', []):
+                md5 = img.get('md5')
+                if not md5:
+                    continue
+
+                # 检查是否已存在
+                existing = conn.execute("SELECT 1 FROM images WHERE md5=?", (md5,)).fetchone()
+
+                if existing:
+                    # 更新标签
+                    tags = img.get('tags', [])
+                    MemeService.update_index(md5, tags)
+                    skipped_images += 1
+                else:
+                    # 新图片（但文件可能不存在，仅导入元数据）
+                    conn.execute(
+                        "INSERT INTO images (md5, filename, created_at, width, height, size) VALUES (?, ?, ?, ?, ?, ?)",
+                        (md5, img.get('filename', f"{md5}.jpg"), img.get('created_at', time.time()),
+                         img.get('width', 0), img.get('height', 0), img.get('size', 0))
+                    )
+                    tags = img.get('tags', [])
+                    MemeService.update_index(md5, tags)
+                    imported_images += 1
+
+            # 2. 清空并重建规则树（覆盖模式）
+            conn.execute("DELETE FROM search_keywords")
+            conn.execute("DELETE FROM search_hierarchy")
+            conn.execute("DELETE FROM search_groups")
+
+            rules = data.get('rules', {})
+
+            # 导入组
+            for group in rules.get('groups', []):
+                conn.execute(
+                    "INSERT INTO search_groups (group_id, group_name, is_enabled) VALUES (?, ?, ?)",
+                    (group['group_id'], group['group_name'], group.get('is_enabled', 1))
+                )
+
+            # 导入关键词
+            for keyword in rules.get('keywords', []):
+                conn.execute(
+                    "INSERT INTO search_keywords (keyword, group_id, is_enabled) VALUES (?, ?, ?)",
+                    (keyword['keyword'], keyword['group_id'], keyword.get('is_enabled', 1))
+                )
+
+            # 导入层级关系
+            for hierarchy in rules.get('hierarchy', []):
+                conn.execute(
+                    "INSERT INTO search_hierarchy (parent_id, child_id) VALUES (?, ?)",
+                    (hierarchy['parent_id'], hierarchy['child_id'])
+                )
+
+            # 3. 重置版本号
+            conn.execute("UPDATE system_meta SET version_id=?, last_updated_at=? WHERE key='rules_state'",
+                        (rules.get('version_id', 0), time.time()))
+
+            # 4. 导入标签字典（如果提供）
+            if 'tags_dict' in data:
+                conn.execute("DELETE FROM tags_dict")
+                for tag_info in data['tags_dict']:
+                    conn.execute("INSERT INTO tags_dict (name, use_count) VALUES (?, ?)",
+                                (tag_info['name'], tag_info.get('use_count', 0)))
+
+            conn.commit()
+
+        return jsonify({
+            "success": True,
+            "imported_images": imported_images,
+            "skipped_images": skipped_images,
+            "message": "Import completed successfully"
+        })
+
+    except Exception as e:
+        print(f"Import failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
