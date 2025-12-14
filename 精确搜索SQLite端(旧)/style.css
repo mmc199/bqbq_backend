@@ -189,3 +189,72 @@ display: block;
 .is-dragging * {
     user-select: none !important;
 }
+
+/* ========== noUiSlider 自定义样式 (标签数量筛选) ========== */
+
+/* 滑块轨道 */
+#tag-slider {
+    height: 8px;
+    background: #e2e8f0;
+    border-radius: 4px;
+    border: none;
+    box-shadow: inset 0 1px 2px rgba(0,0,0,0.1);
+}
+
+/* 滑块连接条（两个手柄之间的部分） */
+#tag-slider .noUi-connect {
+    background: linear-gradient(to right, #06b6d4, #0891b2);
+    border-radius: 4px;
+}
+
+/* 滑块手柄 */
+#tag-slider .noUi-handle {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: white;
+    border: 2px solid #06b6d4;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.15);
+    cursor: grab;
+    top: -5px;
+    right: -9px;
+}
+
+#tag-slider .noUi-handle:hover {
+    border-color: #0891b2;
+    box-shadow: 0 2px 8px rgba(6, 182, 212, 0.4);
+}
+
+#tag-slider .noUi-handle:active {
+    cursor: grabbing;
+    border-color: #0e7490;
+    transform: scale(1.1);
+}
+
+/* 移除默认的手柄装饰线 */
+#tag-slider .noUi-handle::before,
+#tag-slider .noUi-handle::after {
+    display: none;
+}
+
+/* 滑块聚焦样式 */
+#tag-slider .noUi-handle:focus {
+    outline: none;
+    box-shadow: 0 0 0 3px rgba(6, 182, 212, 0.3);
+}
+
+/* 标签数量面板过渡动画 */
+#tag-count-panel {
+    animation: slideIn 0.2s ease-out;
+}
+
+@keyframes slideIn {
+    from {
+        opacity: 0;
+        transform: translateY(-10px) scale(0.95);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+    }
+}

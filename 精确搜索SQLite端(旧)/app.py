@@ -466,12 +466,33 @@ class MemeService:
         搜索图片
         - keywords: 二维数组，每个子数组是一个标签膨胀后的关键词列表（子数组内OR，子数组间AND）
         - excludes: 二维数组，每个子数组是一个排除标签膨胀后的关键词列表（子数组内OR，子数组间AND排除）
+        - extensions: 包含的扩展名列表（如 ['gif', 'png']）
+        - exclude_extensions: 排除的扩展名列表
+        - min_tags: 最小标签数量 (可选)
+        - max_tags: 最大标签数量 (可选，-1 表示无限制)
         """
         offset = params.get('offset', 0)
         limit = params.get('limit', 50)
         keywords_groups = params.get('keywords', [])  # 二维数组: [[kw1a, kw1b], [kw2a, kw2b]]
         excludes_groups = params.get('excludes', [])  # 二维数组: [[ex1a, ex1b], [ex2a, ex2b]]
+        extensions = params.get('extensions', [])  # 扩展名列表: ['gif', 'png']
+        exclude_extensions = params.get('exclude_extensions', [])  # 排除扩展名列表
         sort_by = params.get('sort_by', 'date_desc')
+
+        # 新增：标签数量筛选参数
+        min_tags = params.get('min_tags', 0)
+        max_tags = params.get('max_tags', -1)
+
+        # 参数类型转换和校验
+        try:
+            min_tags = int(min_tags) if min_tags is not None else 0
+        except (TypeError, ValueError):
+            min_tags = 0
+
+        try:
+            max_tags = int(max_tags) if max_tags is not None else -1
+        except (TypeError, ValueError):
+            max_tags = -1
 
         where_clauses = ["1=1"]
         sql_params = []
@@ -499,6 +520,57 @@ class MemeService:
                 sql_params.append(f"%{ex}%")
             if or_conditions:
                 where_clauses.append(f"NOT ({' OR '.join(or_conditions)})")
+
+        # 处理包含扩展名（多个扩展名之间是 OR 关系）
+        if extensions:
+            ext_conditions = []
+            for ext in extensions:
+                # 移除可能的前导点号，统一处理
+                clean_ext = ext.lstrip('.')
+                ext_conditions.append("i.filename LIKE ?")
+                sql_params.append(f"%.{clean_ext}")
+            if ext_conditions:
+                where_clauses.append(f"({' OR '.join(ext_conditions)})")
+
+        # 处理排除扩展名（多个扩展名之间是 OR 关系，整体取反）
+        if exclude_extensions:
+            ext_conditions = []
+            for ext in exclude_extensions:
+                clean_ext = ext.lstrip('.')
+                ext_conditions.append("i.filename LIKE ?")
+                sql_params.append(f"%.{clean_ext}")
+            if ext_conditions:
+                where_clauses.append(f"NOT ({' OR '.join(ext_conditions)})")
+
+        # 新增：标签数量筛选逻辑
+        # 计算每个图片的标签数量 (通过空格分割 tags_text 计算)
+        # tags_text 格式: "tag1 tag2 tag3" 或空字符串/NULL
+        tag_count_filter = ""
+
+        # 检查是否需要应用标签数量筛选
+        needs_tag_count_filter = min_tags > 0 or (max_tags >= 0)
+
+        if needs_tag_count_filter:
+            # 使用子查询计算标签数量
+            # LENGTH(tags_text) - LENGTH(REPLACE(tags_text, ' ', '')) + 1 计算空格数 + 1 = 标签数
+            # 对于空字符串/NULL，标签数为 0
+            tag_count_expr = """
+                CASE
+                    WHEN f.tags_text IS NULL OR f.tags_text = '' THEN 0
+                    ELSE LENGTH(f.tags_text) - LENGTH(REPLACE(f.tags_text, ' ', '')) + 1
+                END
+            """
+
+            if min_tags > 0 and max_tags >= 0:
+                # 同时有最小和最大限制
+                where_clauses.append(f"({tag_count_expr}) >= {min_tags}")
+                where_clauses.append(f"({tag_count_expr}) <= {max_tags}")
+            elif min_tags > 0:
+                # 只有最小限制
+                where_clauses.append(f"({tag_count_expr}) >= {min_tags}")
+            elif max_tags >= 0:
+                # 只有最大限制 (包括 max_tags=0 表示无标签)
+                where_clauses.append(f"({tag_count_expr}) <= {max_tags}")
 
         where_sql = " WHERE " + " AND ".join(where_clauses)
 
@@ -1129,11 +1201,12 @@ def api_tags():
 def api_check_md5():
     """
     检查MD5是否已存在，用于前端上传前预检查。
-    Request: {"md5": "abc123..."}
-    Response: {"exists": true/false, "filename": "..." (if exists)}
+    Request: {"md5": "abc123...", "refresh_time": true/false (optional)}
+    Response: {"exists": true/false, "filename": "..." (if exists), "time_refreshed": true/false}
     """
     data = request.json
     md5 = data.get('md5')
+    refresh_time = data.get('refresh_time', False)
 
     if not md5:
         return jsonify({"error": "Missing md5 parameter"}), 400
@@ -1142,7 +1215,12 @@ def api_check_md5():
         row = conn.execute("SELECT filename FROM images WHERE md5=?", (md5,)).fetchone()
 
         if row:
-            return jsonify({"exists": True, "filename": row['filename']})
+            time_refreshed = False
+            if refresh_time:
+                conn.execute("UPDATE images SET created_at=? WHERE md5=?", (time.time(), md5))
+                conn.commit()
+                time_refreshed = True
+            return jsonify({"exists": True, "filename": row['filename'], "time_refreshed": time_refreshed})
         else:
             return jsonify({"exists": False})
 

@@ -1,13 +1,19 @@
 {
   "permissions": {
     "allow": [
-      "Bash(ls:*)",
-      "Bash(head:*)",
-      "Bash(grep:*)",
-      "Bash(wc:*)",
-      "Bash(dir \"C:\\000soft\\qqpy机器人-git\\bqbq_backend-1\\精确搜索SQLite端(旧)\" /s /b)",
-      "Bash(find:*)",
-      "Bash(cd:*)"
-    ]
+      "Bash(*)",
+      "Read(*)",
+      "Write(*)",
+      "Edit(*)",
+      "Glob(*)",
+      "Grep(*)",
+      "WebFetch(*)",
+      "WebSearch(*)",
+      "Task(*)",
+      "TodoWrite(*)",
+      "NotebookEdit(*)",
+      "Bash(find:*)"
+    ],
+    "deny": []
   }
 }

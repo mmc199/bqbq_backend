@@ -11,6 +11,22 @@ const TAGS_TIME_KEY = 'bqbq_tag_timestamp';
 const RULES_VERSION_KEY = 'bqbq_rules_version'; // 存储规则树的本地版本号
 const CLIENT_ID_KEY = 'bqbq_client_id'; // 存储客户端唯一 ID
 
+// --- 支持的图片扩展名列表 ---
+const SUPPORTED_EXTENSIONS = ['gif', 'png', 'jpg', 'webp'];
+
+// --- 工具函数：防抖 ---
+function debounce(func, wait) {
+    let timeout;
+    return function executedFunction(...args) {
+        const later = () => {
+            clearTimeout(timeout);
+            func(...args);
+        };
+        clearTimeout(timeout);
+        timeout = setTimeout(later, wait);
+    };
+}
+
 // --- 优化 1: 预定义 Inline SVG Icons (减少 DOM 节点和 Lucide 循环调用) ---
 const SVG_ICONS = {
     // Standard Lucide 24x24
@@ -313,12 +329,73 @@ class GlobalState {
         this.tempTags = [];
         this.isTempTagMode = false; // 新增：用于控制临时标签面板的开关状态
 
+        // --- 新增：标签数量筛选状态 ---
+        this.minTags = 0;      // 最小标签数
+        this.maxTags = -1;     // 最大标签数 (-1 表示无限制)
+        this.isTagCountPanelOpen = false; // 标签数量面板开关状态
+
         // --- 新增：批量编辑状态 ---
         this.batchEditMode = false; // 是否处于批量编辑模式
         this.selectedGroupIds = new Set(); // 存储已选中的组ID
 
         // --- 新增：规则树展开状态 ---
-        this.expandedGroupIds = new Set(); // 存储已展开的组ID
+        this.expandedGroupIds = this.loadExpandedState(); // 从 sessionStorage 加载展开状态
+        this.isTreeDefaultExpanded = true; // 标记是否首次加载（用于默认展开）
+    }
+
+    /**
+     * 从 sessionStorage 加载展开状态
+     */
+    loadExpandedState() {
+        try {
+            const saved = sessionStorage.getItem('bqbq_tree_expanded');
+            if (saved) {
+                return new Set(JSON.parse(saved));
+            }
+        } catch (e) {
+            console.warn('Failed to load expanded state from sessionStorage:', e);
+        }
+        return new Set();
+    }
+
+    /**
+     * 保存展开状态到 sessionStorage
+     */
+    saveExpandedState() {
+        try {
+            sessionStorage.setItem('bqbq_tree_expanded', JSON.stringify([...this.expandedGroupIds]));
+        } catch (e) {
+            console.warn('Failed to save expanded state to sessionStorage:', e);
+        }
+    }
+
+    /**
+     * 初始化默认展开状态：如果是首次加载（sessionStorage 中没有数据），则展开所有节点
+     * @param {Array} rulesTree - 规则树数据
+     */
+    initDefaultExpandState(rulesTree) {
+        // 检查 sessionStorage 中是否已有保存的展开状态
+        const savedState = sessionStorage.getItem('bqbq_tree_expanded');
+
+        // 如果已有保存状态，不做任何处理（使用已保存的状态）
+        if (savedState !== null) {
+            return;
+        }
+
+        // 首次加载：展开所有节点
+        if (rulesTree && rulesTree.length > 0) {
+            const collectAllIds = (nodes) => {
+                nodes.forEach(node => {
+                    this.expandedGroupIds.add(node.id);
+                    if (node.children && node.children.length > 0) {
+                        collectAllIds(node.children);
+                    }
+                });
+            };
+            collectAllIds(rulesTree);
+            this.saveExpandedState();
+            console.log('[initDefaultExpandState] 首次加载，已展开所有节点');
+        }
     }
 
     /**
@@ -355,13 +432,15 @@ class MemeApp {
             fabSort: document.getElementById('fab-sort'),
             fabTrash: document.getElementById('fab-trash'),
             fabTemp: document.getElementById('fab-temp-tags'),
+            fabTagCount: document.getElementById('fab-tag-count'), // 新增：标签数量筛选按钮
             btnClearSearch: document.getElementById('clear-search-btn'),
-            
+
             // Indicators / Panels
             hqDot: document.getElementById('hq-status-dot'),
             trashDot: document.getElementById('trash-active-dot'),
             sortMenu: document.getElementById('sort-menu'),
             tempPanel: document.getElementById('temp-tag-panel'),
+            tagCountPanel: document.getElementById('tag-count-panel'), // 新增：标签数量面板
             
             fileInput: document.getElementById('file-upload'),
             btnReload: document.getElementById('reload-search-btn'),
@@ -735,17 +814,33 @@ class MemeApp {
         if (!dl) return;
 
         const MAX_SUGGESTIONS = 4;
-        
+
+        // 检测是否以负号开头（排除标签）
+        const isExclude = currentInput.startsWith('-');
+        const prefix = isExclude ? '-' : '';
+        // 去掉负号前缀后的实际搜索内容
+        const searchText = isExclude ? currentInput.slice(1) : currentInput;
+
+        // 特殊处理：当输入以 . 开头时（或 -. 开头），显示扩展名建议
+        if (searchText.startsWith('.')) {
+            const partialExt = searchText.slice(1).toLowerCase();
+            const extensionSuggestions = SUPPORTED_EXTENSIONS
+                .filter(ext => ext.startsWith(partialExt))
+                .map(ext => `${prefix}.${ext}`);
+            dl.innerHTML = extensionSuggestions.map(t => `<option value="${t}">`).join('');
+            return;
+        }
+
         // 1. 根据当前输入进行动态筛选 (不区分大小写，包含匹配)
-        const filtered = this.state.allKnownTags.filter(tag => 
-            tag.toLowerCase().includes(currentInput.toLowerCase())
+        const filtered = this.state.allKnownTags.filter(tag =>
+            tag.toLowerCase().includes(searchText.toLowerCase())
         );
-        
+
         // 2. 限制最多只显示 MAX_SUGGESTIONS 个
         const limitedTags = filtered.slice(0, MAX_SUGGESTIONS);
 
-        // 3. 更新 datalist 的内容
-        dl.innerHTML = limitedTags.map(t => `<option value="${t}">`).join('');
+        // 3. 更新 datalist 的内容（如果是排除模式，添加负号前缀）
+        dl.innerHTML = limitedTags.map(t => `<option value="${prefix}${t}">`).join('');
     }
 
     initTagInputs() {
@@ -846,6 +941,23 @@ class MemeApp {
             }
         };
 
+        // --- 新增：标签数量筛选按钮事件 ---
+        this.dom.fabTagCount.onclick = () => {
+            this.state.isTagCountPanelOpen = !this.state.isTagCountPanelOpen;
+            if (this.state.isTagCountPanelOpen) {
+                this.dom.tagCountPanel.classList.remove('hidden');
+                this.dom.tagCountPanel.classList.add('flex');
+                this.dom.fabTagCount.classList.add('bg-cyan-100', 'border-cyan-300');
+            } else {
+                this.dom.tagCountPanel.classList.add('hidden');
+                this.dom.tagCountPanel.classList.remove('flex');
+                this.dom.fabTagCount.classList.remove('bg-cyan-100', 'border-cyan-300');
+            }
+        };
+
+        // 初始化标签数量筛选滑块
+        this.initTagCountSlider();
+
         // =========================================================================
         // --- 新增：规则树侧边栏事件 ---
         // =========================================================================
@@ -874,10 +986,27 @@ class MemeApp {
 
         // 规则树搜索
         const treeSearchInput = document.getElementById('rules-tree-search');
+        const treeSearchClearBtn = document.getElementById('rules-tree-search-clear');
+
         if (treeSearchInput) {
             treeSearchInput.addEventListener('input', (e) => {
                 this.filterRulesTree(e.target.value);
+                // 显示/隐藏清空按钮
+                if (treeSearchClearBtn) {
+                    treeSearchClearBtn.classList.toggle('hidden', !e.target.value);
+                }
             });
+        }
+
+        if (treeSearchClearBtn) {
+            treeSearchClearBtn.onclick = () => {
+                if (treeSearchInput) {
+                    treeSearchInput.value = '';
+                    treeSearchInput.focus();
+                    this.filterRulesTree('');
+                }
+                treeSearchClearBtn.classList.add('hidden');
+            };
         }
 
         // --- 批量编辑模式按钮事件绑定 ---
@@ -902,6 +1031,13 @@ class MemeApp {
         if (batchEnableBtn) batchEnableBtn.onclick = () => this.batchEnableGroups();
         if (batchDisableBtn) batchDisableBtn.onclick = () => this.batchDisableGroups();
         if (batchDeleteBtn) batchDeleteBtn.onclick = () => this.batchDeleteGroups();
+
+        // --- 展开/折叠全部按钮事件绑定 ---
+        const expandAllBtn = document.getElementById('expand-all-btn');
+        const collapseAllBtn = document.getElementById('collapse-all-btn');
+
+        if (expandAllBtn) expandAllBtn.onclick = () => this.expandAllGroups();
+        if (collapseAllBtn) collapseAllBtn.onclick = () => this.collapseAllGroups();
 
         // Rules Tree Toggle: 树状结构节点展开/收起（事件委托）
         this.dom.rulesTreeContainer.addEventListener('click', (e) => {
@@ -1177,6 +1313,144 @@ class MemeApp {
         }
     }
 
+    // --- 新增：标签数量筛选滑块初始化 ---
+    initTagCountSlider() {
+        const sliderEl = document.getElementById('tag-slider');
+        const inputMin = document.getElementById('input-min-tags');
+        const inputMax = document.getElementById('input-max-tags');
+        const display = document.getElementById('tag-count-display');
+        const badge = document.getElementById('tag-count-badge');
+        const closeBtn = document.getElementById('close-tag-count-panel');
+
+        if (!sliderEl || !inputMin || !inputMax) {
+            console.warn('Tag count slider elements not found');
+            return;
+        }
+
+        // 滑块视觉最大值 (超过此值需使用输入框)
+        const SLIDER_MAX_VAL = 6;
+
+        // 创建 noUiSlider
+        noUiSlider.create(sliderEl, {
+            start: [0, SLIDER_MAX_VAL],
+            connect: true,
+            step: 1,
+            range: { 'min': 0, 'max': SLIDER_MAX_VAL }
+        });
+
+        // 防抖加载函数
+        const debouncedSearch = debounce(() => this.resetSearch(), 300);
+
+        // 更新显示和徽章
+        const updateDisplay = () => {
+            const minText = this.state.minTags;
+            const maxText = (this.state.maxTags === -1) ? '∞' : this.state.maxTags;
+            display.textContent = `${minText} - ${maxText}`;
+
+            // 更新徽章
+            if (this.state.minTags === 0 && this.state.maxTags === -1) {
+                badge.classList.add('hidden');
+                this.dom.fabTagCount.classList.remove('bg-cyan-100', 'border-cyan-300');
+            } else {
+                badge.textContent = `${minText}-${maxText}`;
+                badge.classList.remove('hidden');
+                this.dom.fabTagCount.classList.add('bg-cyan-100', 'border-cyan-300');
+            }
+        };
+
+        // 滑块拖动事件
+        sliderEl.noUiSlider.on('update', (values, handle) => {
+            const v = parseInt(values[handle]);
+
+            if (handle === 0) { // 左手柄 (Min)
+                const currentInputVal = parseInt(inputMin.value) || 0;
+                if (v < SLIDER_MAX_VAL || currentInputVal <= SLIDER_MAX_VAL) {
+                    inputMin.value = v;
+                    this.state.minTags = v;
+                }
+            } else { // 右手柄 (Max)
+                if (v < SLIDER_MAX_VAL) {
+                    inputMax.value = v;
+                    this.state.maxTags = v;
+                } else {
+                    const currentVal = parseInt(inputMax.value);
+                    if (!isNaN(currentVal) && currentVal > SLIDER_MAX_VAL) {
+                        this.state.maxTags = currentVal;
+                    } else {
+                        inputMax.value = '∞';
+                        this.state.maxTags = -1;
+                    }
+                }
+            }
+
+            updateDisplay();
+        });
+
+        // 滑块拖动结束触发搜索
+        sliderEl.noUiSlider.on('change', () => {
+            debouncedSearch();
+        });
+
+        // 最小值输入框事件
+        inputMin.onchange = () => {
+            let val = parseInt(inputMin.value);
+            if (isNaN(val) || val < 0) val = 0;
+
+            this.state.minTags = val;
+            inputMin.value = val;
+
+            const visualVal = (val > SLIDER_MAX_VAL) ? SLIDER_MAX_VAL : val;
+            sliderEl.noUiSlider.set([visualVal, null]);
+
+            updateDisplay();
+            this.resetSearch();
+        };
+
+        // 最大值输入框事件
+        inputMax.onchange = () => {
+            let raw = inputMax.value.trim();
+            let val;
+
+            if (raw === '∞' || raw === '' || raw.toLowerCase() === 'inf') {
+                val = -1;
+                inputMax.value = '∞';
+                sliderEl.noUiSlider.set([null, SLIDER_MAX_VAL]);
+            } else {
+                val = parseInt(raw);
+                if (isNaN(val) || val < 0) val = -1;
+
+                if (val === -1) {
+                    inputMax.value = '∞';
+                } else {
+                    inputMax.value = val;
+                }
+
+                this.state.maxTags = val;
+                const visualVal = (val > SLIDER_MAX_VAL || val === -1) ? SLIDER_MAX_VAL : val;
+                sliderEl.noUiSlider.set([null, visualVal]);
+            }
+
+            this.state.maxTags = val;
+            updateDisplay();
+            this.resetSearch();
+        };
+
+        // 关闭按钮
+        if (closeBtn) {
+            closeBtn.onclick = () => {
+                this.state.isTagCountPanelOpen = false;
+                this.dom.tagCountPanel.classList.add('hidden');
+                this.dom.tagCountPanel.classList.remove('flex');
+                if (this.state.minTags === 0 && this.state.maxTags === -1) {
+                    this.dom.fabTagCount.classList.remove('bg-cyan-100', 'border-cyan-300');
+                }
+            };
+        }
+
+        // 初始化显示
+        updateDisplay();
+    }
+
     // --- Data Loading & Rendering ---
 
 
@@ -1263,15 +1537,37 @@ class MemeApp {
         this.state.loading = true;
         this.dom.loader.classList.remove('hidden');
 
-        // 分离三种类型的标签：
-        // 1. 普通包含标签（非排除、非同义词组）- 需要通过规则树膨胀
-        // 2. 同义词组包含标签（非排除、是同义词组）- 每个词经过规则树膨胀后合并为一个OR组
-        // 3. 普通排除标签（排除、非同义词组）- 需要通过规则树膨胀
-        // 4. 同义词组排除标签（排除、是同义词组）- 每个词经过规则树膨胀后合并为一个OR组
+        // 辅助函数：判断是否是扩展名标签（以.开头且是支持的扩展名）
+        const isExtensionTag = (text) => {
+            if (!text.startsWith('.')) return false;
+            const ext = text.slice(1).toLowerCase();
+            return SUPPORTED_EXTENSIONS.includes(ext);
+        };
 
-        const normalIncludes = this.state.queryTags.filter(t => !t.exclude && !t.synonym).map(t => t.text);
+        // 分离标签类型：
+        // 1. 扩展名标签（以.开头的扩展名，如 .gif, .png）
+        // 2. 普通包含标签（非排除、非同义词组、非扩展名）- 需要通过规则树膨胀
+        // 3. 同义词组包含标签（非排除、是同义词组）- 每个词经过规则树膨胀后合并为一个OR组
+        // 4. 普通排除标签（排除、非同义词组、非扩展名）- 需要通过规则树膨胀
+        // 5. 同义词组排除标签（排除、是同义词组）- 每个词经过规则树膨胀后合并为一个OR组
+
+        // 提取扩展名标签
+        const extensionIncludes = this.state.queryTags
+            .filter(t => !t.exclude && !t.synonym && isExtensionTag(t.text))
+            .map(t => t.text.slice(1).toLowerCase()); // 移除点号
+
+        const extensionExcludes = this.state.queryTags
+            .filter(t => t.exclude && !t.synonym && isExtensionTag(t.text))
+            .map(t => t.text.slice(1).toLowerCase()); // 移除点号
+
+        // 普通标签（排除扩展名标签）
+        const normalIncludes = this.state.queryTags
+            .filter(t => !t.exclude && !t.synonym && !isExtensionTag(t.text))
+            .map(t => t.text);
         const synonymIncludes = this.state.queryTags.filter(t => !t.exclude && t.synonym);
-        const normalExcludes = this.state.queryTags.filter(t => t.exclude && !t.synonym).map(t => t.text);
+        const normalExcludes = this.state.queryTags
+            .filter(t => t.exclude && !t.synonym && !isExtensionTag(t.text))
+            .map(t => t.text);
         const synonymExcludes = this.state.queryTags.filter(t => t.exclude && t.synonym);
 
         // 膨胀普通包含标签（返回二维数组：每个标签膨胀后的同义词组）
@@ -1325,7 +1621,11 @@ class MemeApp {
             limit: this.state.limit,
             sort_by: this.state.sortBy,
             keywords: expandedIncludesGroups,  // 二维数组
-            excludes: expandedExcludesGroups   // 二维数组
+            excludes: expandedExcludesGroups,  // 二维数组
+            extensions: extensionIncludes,     // 包含的扩展名
+            exclude_extensions: extensionExcludes,  // 排除的扩展名
+            min_tags: this.state.minTags,      // 新增：最小标签数
+            max_tags: this.state.maxTags       // 新增：最大标签数 (-1 表示无限制)
         };
 
         try {
@@ -1661,6 +1961,8 @@ class MemeApp {
                     } else {
                         expandedIds.add(node.id);
                     }
+                    // 保存到 sessionStorage
+                    this.state.saveExpandedState();
                 };
 
                 header.ondblclick = (e) => {
@@ -2891,6 +3193,9 @@ class MemeApp {
                         this.state.allKnownTags = data.keywords.map(k => k.keyword);
                         this.filterAndUpdateDatalist('');
                         console.log('[304] Loaded rules from localStorage cache');
+
+                        // 首次加载时默认展开所有节点（如果 sessionStorage 中没有保存过状态）
+                        this.state.initDefaultExpandState(this.state.rulesTree);
                     } catch (e) {
                         console.error('[304] Failed to parse cached rules:', e);
                     }
@@ -2922,6 +3227,9 @@ class MemeApp {
                 // 4. 更新图片标签建议 (保持不变)
                 this.state.allKnownTags = data.keywords.map(k => k.keyword);
                 this.filterAndUpdateDatalist('');
+
+                // 首次加载时默认展开所有节点（如果 sessionStorage 中没有保存过状态）
+                this.state.initDefaultExpandState(this.state.rulesTree);
 
                 // 5. 渲染侧边栏 UI
                 this.renderRulesTree();
@@ -3594,6 +3902,38 @@ class MemeApp {
     // =========================================================================
 
     /**
+     * 展开所有组
+     */
+    expandAllGroups() {
+        if (!this.state.rulesTree) return;
+
+        // 收集所有组ID
+        const collectAllIds = (nodes) => {
+            nodes.forEach(node => {
+                this.state.expandedGroupIds.add(node.id);
+                collectAllIds(node.children);
+            });
+        };
+        collectAllIds(this.state.rulesTree);
+
+        // 保存状态并重新渲染
+        this.state.saveExpandedState();
+        this.renderRulesTree(true);
+    }
+
+    /**
+     * 折叠所有组
+     */
+    collapseAllGroups() {
+        // 清空展开状态
+        this.state.expandedGroupIds.clear();
+
+        // 保存状态并重新渲染
+        this.state.saveExpandedState();
+        this.renderRulesTree(true);
+    }
+
+    /**
      * 切换批量编辑模式
      */
     toggleBatchMode() {
@@ -3801,61 +4141,74 @@ class MemeApp {
     }
 
     /**
-     * 筛选并高亮显示规则树节点
+     * 筛选并高亮显示规则树节点，自动展开匹配节点及其父节点
      * @param {string} searchText - 搜索关键词
      */
     filterRulesTree(searchText) {
-        const container = document.getElementById('rules-tree-container');
-        if (!container) return;
-
         const normalizedSearch = searchText.toLowerCase().trim();
 
         if (!normalizedSearch) {
-            // 清空搜索：显示所有节点
-            container.querySelectorAll('.group-node').forEach(card => {
-                card.style.display = '';
-                card.classList.remove('ring-2', 'ring-green-400');
-            });
+            // 清空搜索：重新渲染规则树（恢复到之前的展开状态）
+            this.renderRulesTree(true);
             return;
         }
 
-        let matchCount = 0;
+        // 收集所有需要展开的节点ID（匹配节点及其所有祖先）
+        const nodesToExpand = new Set();
 
-        container.querySelectorAll('.group-node').forEach(card => {
-            const groupId = card.dataset.id;
-            const groupName = card.dataset.name;
+        /**
+         * 递归查找匹配节点，并收集需要展开的节点ID
+         * @param {Array} nodes - 节点数组
+         * @param {Array} ancestors - 祖先节点ID数组
+         * @returns {boolean} 是否有匹配的子孙节点
+         */
+        const findMatchingNodes = (nodes, ancestors = []) => {
+            let hasMatchingDescendant = false;
 
-            if (!groupId) {
-                card.style.display = 'none';
-                return;
-            }
+            for (const node of nodes) {
+                const currentAncestors = [...ancestors, node.id];
 
-            // 检查组名或关键词是否匹配
-            const groupNameMatch = groupName && groupName.toLowerCase().includes(normalizedSearch);
+                // 检查组名匹配
+                const groupNameMatch = node.name && node.name.toLowerCase().includes(normalizedSearch);
 
-            // 检查关键词匹配
-            const keywordElements = card.querySelectorAll('.keyword-capsule');
-            const keywordMatch = Array.from(keywordElements).some(el =>
-                el.textContent.toLowerCase().includes(normalizedSearch)
-            );
+                // 检查关键词匹配
+                const keywordMatch = node.keywords.some(k =>
+                    k.text.toLowerCase().includes(normalizedSearch)
+                );
 
-            if (groupNameMatch || keywordMatch) {
-                card.style.display = '';
-                card.classList.add('ring-2', 'ring-green-400');
-                matchCount++;
+                // 递归检查子节点
+                const childHasMatch = findMatchingNodes(node.children, currentAncestors);
 
-                // 滚动到第一个匹配项
-                if (matchCount === 1) {
-                    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                // 如果当前节点或其子孙匹配，展开所有祖先
+                if (groupNameMatch || keywordMatch || childHasMatch) {
+                    hasMatchingDescendant = true;
+                    // 展开当前节点自身（显示其关键词/同义词）
+                    nodesToExpand.add(node.id);
+                    // 展开所有祖先节点
+                    ancestors.forEach(id => nodesToExpand.add(id));
                 }
-            } else {
-                card.style.display = 'none';
-                card.classList.remove('ring-2', 'ring-green-400');
             }
-        });
 
-        if (matchCount === 0) {
-            this.showToast('未找到匹配项', 'info');
+            return hasMatchingDescendant;
+        };
+
+        // 执行搜索
+        if (this.state.rulesTree) {
+            findMatchingNodes(this.state.rulesTree);
+        }
+
+        // 更新展开状态并重新渲染
+        nodesToExpand.forEach(id => this.state.expandedGroupIds.add(id));
+        this.state.saveExpandedState();
+        this.renderRulesTree(true);
+
+        // 滚动到第一个匹配项
+        const container = document.getElementById('rules-tree-container');
+        if (container) {
+            const firstMatch = container.querySelector('.group-node.bg-blue-50');
+            if (firstMatch) {
+                firstMatch.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
         }
     }
 
@@ -3950,15 +4303,16 @@ class MemeApp {
     }
 
     /**
-     * 检查MD5是否已存在
+     * 检查MD5是否已存在，并可选择刷新上传时间
      * @param {string} md5 - MD5哈希值
-     * @returns {Promise<object>} {exists: boolean, filename: string}
+     * @param {boolean} refreshTime - 是否刷新上传时间（用于重复图片）
+     * @returns {Promise<object>} {exists: boolean, filename: string, time_refreshed: boolean}
      */
-    async checkMD5Exists(md5) {
+    async checkMD5Exists(md5, refreshTime = false) {
         const response = await fetch('/api/check_md5', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ md5 })
+            body: JSON.stringify({ md5, refresh_time: refreshTime })
         });
         return await response.json();
     }
@@ -3977,12 +4331,16 @@ class MemeApp {
                 const md5 = await this.calculateMD5(file);
                 console.log(`File MD5: ${md5}`);
 
-                // 2. 检查是否已存在
-                const checkResult = await this.checkMD5Exists(md5);
+                // 2. 检查是否已存在，如果存在则刷新时间戳
+                const checkResult = await this.checkMD5Exists(md5, true);
 
                 if (checkResult.exists) {
-                    // 重复文件：仅刷新时间戳
-                    this.showToast(`图片已存在：${file.name}（已更新时间戳）`, 'info');
+                    // 重复文件：已在后端刷新时间戳
+                    if (checkResult.time_refreshed) {
+                        this.showToast(`图片已存在：${file.name}（已更新时间戳）`, 'info');
+                    } else {
+                        this.showToast(`图片已存在：${file.name}`, 'info');
+                    }
                     continue;
                 }
 
