@@ -19,7 +19,7 @@
 <body class="bg-slate-50 text-slate-800 h-screen flex flex-col overflow-hidden">
 
     <!-- Header: 全宽搜索栏 -->
-    <header class="h-16 bg-white/90 /* REMOVED backdrop-blur */ border-b border-slate-200 flex items-center px-4 z-30 shrink-0 gap-2 shadow-sm">
+    <header id="app-header" class="h-16 bg-white/90 /* REMOVED backdrop-blur */ border-b border-slate-200 flex items-center px-4 z-30 shrink-0 gap-2 shadow-sm">
         <!-- Search Container -->
         <div id="header-search-bar" class="flex-1 flex flex-wrap items-center gap-2 bg-slate-100 rounded-xl px-3 py-2 min-h-[50px] cursor-text transition-colors hover:bg-slate-50 focus-within:bg-white focus-within:ring-2 focus-within:ring-blue-100 border border-transparent focus-within:border-blue-300">
             <!-- JS will inject TagInput here -->
@@ -27,15 +27,16 @@
     </header>
 
     <aside id="rules-tree-panel" class="fixed top-16 left-0 h-full w-72 bg-white border-r border-slate-200 z-40 transform -translate-x-full transition-transform duration-300 flex flex-col p-4 shadow-xl">
-        <div class="flex items-center justify-between mb-3">
-            <h3 class="text-lg font-bold text-slate-700">🌳 语义森林规则</h3>
+    <!-- Rules Tree Panel Header -->
+        <div id="rules-panel-header" class="flex items-center justify-between mb-3">
+            <h3 id="rules-panel-title" class="text-lg font-bold text-slate-700">🌳 语义森林规则</h3>
             <button id="refresh-rules-btn" class="p-1.5 text-slate-500 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition" title="刷新规则树">
                 <i data-lucide="refresh-cw" class="w-4 h-4"></i>
             </button>
         </div>
 
         <!-- 规则树专用搜索栏 -->
-        <div class="mb-3 relative">
+        <div id="rules-search-container" class="mb-3 relative">
             <input
                 type="text"
                 id="rules-tree-search"
@@ -91,12 +92,12 @@
             </div>
         </div>
 
-        <div class="flex-1 overflow-y-auto custom-scrollbar">
+        <div id="rules-tree-content" class="flex-1 overflow-y-auto custom-scrollbar">
             <div id="rules-tree-container" class="space-y-2">
                 <p class="text-sm text-slate-400">加载中...</p>
             </div>
         </div>
-        <div class="mt-4 pt-3 border-t border-slate-100 text-xs text-slate-500 flex justify-between items-center">
+        <div id="rules-panel-footer" class="mt-4 pt-3 border-t border-slate-100 text-xs text-slate-500 flex justify-between items-center">
             <span id="rules-version-info">V0</span>
             <button id="rules-force-sync" class="text-blue-500 hover:text-blue-700">强制同步</button>
         </div>
@@ -120,14 +121,14 @@
     </main>
 
     <!-- Temp Tag Panel (Hidden by default) -->
-    <!-- 
-       UPDATED: 
+    <!--
+       UPDATED:
        - Fixed to top (top-24) instead of bottom.
        - Moved left (right-44) to avoid overlap with the button grid on the right.
     -->
     <div id="temp-tag-panel" class="fixed top-24 right-44 bg-white rounded-xl shadow-2xl border border-slate-200 p-3 z-40 hidden w-64 flex-col gap-2 transform transition-all duration-200 origin-top-right">
         <div class="text-xs font-bold text-slate-500 mb-1 flex justify-between">
-            <span>临时标签 (点击图片粘贴)</span>
+            <span id="temp-panel-title">临时标签 (点击图片粘贴)</span>
             <span id="close-temp-panel" class="cursor-pointer hover:text-red-500">&times;</span>
         </div>
         <div id="temp-tag-input-container" class="flex flex-wrap gap-1 bg-slate-50 p-2 rounded border border-slate-200 min-h-[40px] cursor-text">
@@ -139,9 +140,9 @@
     <!-- Tag Count Filter Panel (Hidden by default) -->
     <div id="tag-count-panel" class="fixed top-24 right-44 bg-white rounded-xl shadow-2xl border border-slate-200 p-3 z-40 hidden flex-col w-52 origin-top-right">
         <!-- 第一行：输入框 + 标题 + 关闭按钮 -->
-        <div class="flex items-center justify-between gap-1 mb-2">
+        <div id="tag-count-header" class="flex items-center justify-between gap-1 mb-2">
             <input id="input-min-tags" type="number" min="0" value="0" class="w-12 px-1 py-0.5 text-xs border border-slate-200 rounded text-center focus:ring-1 focus:ring-cyan-300 focus:border-cyan-400 outline-none text-slate-600">
-            <span class="text-xs font-bold text-slate-600 flex-1 text-center">标签数</span>
+            <span id="tag-count-title" class="text-xs font-bold text-slate-600 flex-1 text-center">标签数</span>
             <input id="input-max-tags" type="text" value="∞" class="w-12 px-1 py-0.5 text-xs border border-slate-200 rounded text-center focus:ring-1 focus:ring-cyan-300 focus:border-cyan-400 outline-none text-slate-600">
             <span id="close-tag-count-panel" class="cursor-pointer text-slate-400 hover:text-red-500 text-base ml-1">&times;</span>
         </div>
@@ -157,12 +158,12 @@
        - Moved left (right-44) to allow space for the button grid.
     -->
     <div id="sort-menu" class="fixed top-24 right-44 bg-white rounded-xl shadow-xl border border-slate-200 py-2 z-40 hidden flex-col w-40 origin-top-right">
-        <button data-sort="date_desc" class="sort-option px-4 py-2 text-sm text-left hover:bg-slate-50 text-blue-600 font-bold">📅 最新添加</button>
-        <button data-sort="date_asc" class="sort-option px-4 py-2 text-sm text-left hover:bg-slate-50 text-slate-600">📅 最早添加</button>
-        <button data-sort="size_desc" class="sort-option px-4 py-2 text-sm text-left hover:bg-slate-50 text-slate-600">💾 文件很大</button>
-        <button data-sort="size_asc" class="sort-option px-4 py-2 text-sm text-left hover:bg-slate-50 text-slate-600">💾 文件很小</button>
-        <button data-sort="resolution_desc" class="sort-option px-4 py-2 text-sm text-left hover:bg-slate-50 text-slate-600">📐 高分辨率</button>
-        <button data-sort="resolution_asc" class="sort-option px-4 py-2 text-sm text-left hover:bg-slate-50 text-slate-600">📐 低分辨率</button>
+        <button id="sort-date-desc" data-sort="date_desc" class="sort-option px-4 py-2 text-sm text-left hover:bg-slate-50 text-blue-600 font-bold">📅 最新添加</button>
+        <button id="sort-date-asc" data-sort="date_asc" class="sort-option px-4 py-2 text-sm text-left hover:bg-slate-50 text-slate-600">📅 最早添加</button>
+        <button id="sort-size-desc" data-sort="size_desc" class="sort-option px-4 py-2 text-sm text-left hover:bg-slate-50 text-slate-600">💾 文件很大</button>
+        <button id="sort-size-asc" data-sort="size_asc" class="sort-option px-4 py-2 text-sm text-left hover:bg-slate-50 text-slate-600">💾 文件很小</button>
+        <button id="sort-resolution-desc" data-sort="resolution_desc" class="sort-option px-4 py-2 text-sm text-left hover:bg-slate-50 text-slate-600">📐 高分辨率</button>
+        <button id="sort-resolution-asc" data-sort="resolution_asc" class="sort-option px-4 py-2 text-sm text-left hover:bg-slate-50 text-slate-600">📐 低分辨率</button>
     </div>
 
     <!-- Floating Action Buttons (Stack) -->
@@ -171,7 +172,7 @@
        - Changed `bottom-8` to `top-24` to stick to the top section.
        - Removed `lg:top-1/2` centering logic to keep it consistently at the top.
     -->
-    <div class="fixed right-8 grid grid-cols-2 gap-3 z-50 top-48">
+    <div id="fab-container" class="fixed right-8 grid grid-cols-2 gap-3 z-50 top-48">
 
         <!-- Export JSON -->
         <button id="fab-export" class="w-14 h-14 bg-white hover:bg-amber-50 text-amber-600 border border-amber-200 rounded-2xl shadow-lg hover:shadow-xl hover:scale-105 transition-all flex items-center justify-center relative group" title="导出数据">
@@ -223,7 +224,7 @@
         </button>
 
         <!-- Main Search (Focus) + Satellites -->
-        <div class="relative group">
+        <div id="search-btn-group" class="relative group">
             <button id="fab-search" class="w-14 h-14 bg-blue-600 hover:bg-blue-700 text-white rounded-2xl shadow-xl hover:shadow-2xl hover:scale-105 transition-all flex items-center justify-center z-20 relative">
                 <i data-lucide="search" class="w-7 h-7"></i>
             </button>
