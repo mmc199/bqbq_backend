@@ -155,10 +155,18 @@ class TagInput {
         }
 
         // 检查是否包含逗号（中文或英文），如果有则为同义词组
-        // 注意：排除标签也可以是同义词组（如 -猫,喵,cat 表示排除这组同义词中的任意一个）
+        // 注意：排除标签也可以是同义词组
+        // - 包含标签的同义词组（如 猫,喵,cat）表示匹配任一即包含（OR关系）
+        // - 排除标签的同义词组（如 -猫,狗,鸟）表示必须都匹配才排除（AND关系，即交集排除）
         if (text.includes(',') || text.includes('，')) {
             // 分割并清理每个词
             synonymWords = text.split(/[,，]/).map(w => w.trim()).filter(w => w.length > 0);
+
+            // 如果是排除标签，去掉每个词前面多余的负号（除第一个外）
+            if (isExclude && synonymWords.length > 0) {
+                synonymWords = synonymWords.map(w => w.startsWith('-') ? w.substring(1) : w).filter(w => w.length > 0);
+            }
+
             if (synonymWords.length > 1) {
                 isSynonym = true;
                 text = synonymWords.join(', '); // 规范化显示格式
@@ -221,6 +229,8 @@ class TagInput {
     }
 
     getStyle(isExclude, isSynonym = false) {
+        // 排除+同义词组（交集排除）：橙红色，区分于普通排除
+        if (isExclude && isSynonym) return 'bg-orange-100 text-orange-700 border border-orange-300 hover:bg-orange-200';
         if (isExclude) return 'bg-red-100 text-red-600 border border-red-200 hover:bg-red-200';
         if (isSynonym) return 'bg-green-100 text-green-600 border border-green-200 hover:bg-green-200';
         if (this.theme === 'purple') return 'bg-purple-100 text-purple-700 border border-purple-200 hover:bg-purple-200';
@@ -248,7 +258,13 @@ class TagInput {
             spanText.textContent = (isExclude ? '-' : '') + text;
             // 为同义词组添加 title 提示
             if (isSynonym) {
-                capsule.title = `同义词组: ${tag.synonymWords.join(' | ')}`;
+                if (isExclude) {
+                    // 排除类型的多关键词胶囊：交集排除
+                    capsule.title = `交集排除: 同时包含 [${tag.synonymWords.join(' 且 ')}] 的图片才会被排除`;
+                } else {
+                    // 包含类型的同义词组：OR关系
+                    capsule.title = `同义词组: ${tag.synonymWords.join(' | ')}`;
+                }
             }
             spanText.onclick = (e) => {
                 e.stopPropagation();
@@ -1587,20 +1603,25 @@ class MemeApp {
         // 膨胀普通排除标签
         const expandedNormalExcludes = this.expandKeywordsToGroups(normalExcludes);
 
-        // 同义词组排除标签：每个词经过规则树膨胀，然后将所有结果合并为一个OR组
-        const synonymExcludeGroups = synonymExcludes.map(t => {
-            // 对同义词组中的每个词进行膨胀
-            const expandedWords = t.synonymWords.flatMap(word => this.expandSingleKeyword(word));
-            // 去重后返回为一个OR组
-            return [...new Set(expandedWords)];
+        // 同义词组排除标签（交集排除）：
+        // 每个词独立膨胀，保持为三维数组结构 [胶囊[关键词[膨胀词组]]]
+        // 后端需要对每个胶囊内的关键词组做交集处理
+        const synonymExcludeAndGroups = synonymExcludes.map(t => {
+            // 对同义词组中的每个词独立膨胀，返回二维数组
+            return t.synonymWords.map(word => {
+                const expanded = this.expandSingleKeyword(word);
+                return [...new Set(expanded)]; // 每个词膨胀后去重
+            });
         });
 
-        // 合并排除标签：普通膨胀结果 + 同义词组
-        const expandedExcludesGroups = [...expandedNormalExcludes, ...synonymExcludeGroups];
+        // 合并排除标签：普通膨胀结果（OR排除）
+        const expandedExcludesGroups = [...expandedNormalExcludes];
 
         // 计算膨胀后的总关键词数（用于用户反馈）
         const totalExpandedIncludes = expandedIncludesGroups.reduce((sum, g) => sum + g.length, 0);
         const totalExpandedExcludes = expandedExcludesGroups.reduce((sum, g) => sum + g.length, 0);
+        const totalExpandedAndExcludes = synonymExcludeAndGroups.reduce((sum, capsule) =>
+            sum + capsule.reduce((s, g) => s + g.length, 0), 0);
         const totalOriginalIncludes = normalIncludes.length + synonymIncludes.length;
         const totalOriginalExcludes = normalExcludes.length + synonymExcludes.length;
 
@@ -1612,8 +1633,11 @@ class MemeApp {
             this.hideExpandedKeywordsBadge();
         }
 
-        if (totalOriginalExcludes > 0 && totalExpandedExcludes > totalOriginalExcludes) {
-            console.log(`[关键词膨胀] 排除: ${totalOriginalExcludes} 个标签 → ${totalExpandedExcludes} 个关键词`);
+        if (totalOriginalExcludes > 0 && (totalExpandedExcludes + totalExpandedAndExcludes) > totalOriginalExcludes) {
+            console.log(`[关键词膨胀] 排除: ${totalOriginalExcludes} 个标签 → ${totalExpandedExcludes + totalExpandedAndExcludes} 个关键词`);
+            if (synonymExcludeAndGroups.length > 0) {
+                console.log(`[交集排除] ${synonymExcludeAndGroups.length} 个交集排除胶囊`);
+            }
         }
 
         const payload = {
@@ -1621,7 +1645,8 @@ class MemeApp {
             limit: this.state.limit,
             sort_by: this.state.sortBy,
             keywords: expandedIncludesGroups,  // 二维数组
-            excludes: expandedExcludesGroups,  // 二维数组
+            excludes: expandedExcludesGroups,  // 二维数组（OR排除）
+            excludes_and: synonymExcludeAndGroups,  // 三维数组（交集排除）
             extensions: extensionIncludes,     // 包含的扩展名
             exclude_extensions: extensionExcludes,  // 排除的扩展名
             min_tags: this.state.minTags,      // 新增：最小标签数

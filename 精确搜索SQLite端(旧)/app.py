@@ -466,6 +466,8 @@ class MemeService:
         搜索图片
         - keywords: 二维数组，每个子数组是一个标签膨胀后的关键词列表（子数组内OR，子数组间AND）
         - excludes: 二维数组，每个子数组是一个排除标签膨胀后的关键词列表（子数组内OR，子数组间AND排除）
+        - excludes_and: 三维数组，交集排除，结构为 [[[kw1膨胀组], [kw2膨胀组]], ...]
+                        每个胶囊内的关键词组需要同时匹配才排除（组内OR，组间AND，整体NOT）
         - extensions: 包含的扩展名列表（如 ['gif', 'png']）
         - exclude_extensions: 排除的扩展名列表
         - min_tags: 最小标签数量 (可选)
@@ -475,6 +477,7 @@ class MemeService:
         limit = params.get('limit', 50)
         keywords_groups = params.get('keywords', [])  # 二维数组: [[kw1a, kw1b], [kw2a, kw2b]]
         excludes_groups = params.get('excludes', [])  # 二维数组: [[ex1a, ex1b], [ex2a, ex2b]]
+        excludes_and_groups = params.get('excludes_and', [])  # 三维数组: 交集排除 [[[kw1a, kw1b], [kw2a, kw2b]], ...]
         extensions = params.get('extensions', [])  # 扩展名列表: ['gif', 'png']
         exclude_extensions = params.get('exclude_extensions', [])  # 排除扩展名列表
         sort_by = params.get('sort_by', 'date_desc')
@@ -520,6 +523,29 @@ class MemeService:
                 sql_params.append(f"%{ex}%")
             if or_conditions:
                 where_clauses.append(f"NOT ({' OR '.join(or_conditions)})")
+
+        # 处理交集排除关键词组（每个胶囊内的多个关键词组需要同时匹配才排除）
+        # 结构: [[[kw1a, kw1b], [kw2a, kw2b]], ...]
+        # 每个胶囊: [[kw1膨胀组], [kw2膨胀组], ...]
+        # 排除条件: 所有关键词组都至少匹配一个时才排除
+        for capsule in excludes_and_groups:
+            if not capsule:
+                continue
+            # 每个关键词组内部是 OR 关系（膨胀后的同义词）
+            # 关键词组之间是 AND 关系（交集）
+            and_conditions = []
+            for kw_group in capsule:
+                if not kw_group:
+                    continue
+                or_conditions = []
+                for kw in kw_group:
+                    or_conditions.append("f.tags_text LIKE ?")
+                    sql_params.append(f"%{kw}%")
+                if or_conditions:
+                    and_conditions.append(f"({' OR '.join(or_conditions)})")
+            if and_conditions:
+                # 所有条件都满足时才排除
+                where_clauses.append(f"NOT ({' AND '.join(and_conditions)})")
 
         # 处理包含扩展名（多个扩展名之间是 OR 关系）
         if extensions:
