@@ -135,9 +135,9 @@ display: block;
 
 /* 根目录放置区 */
 .root-drop-zone {
-    min-height: 32px;
+    min-height: 28px;
     margin-bottom: 8px;
-    border-radius: 8px;
+    border-radius: 6px;
     border: 2px dashed #d1d5db;
     background-color: #f9fafb;
     display: flex;
@@ -145,6 +145,9 @@ display: block;
     justify-content: center;
     transition: all 0.15s ease-out;
     cursor: pointer;
+    color: #9ca3af;
+    font-size: 11px;
+    font-weight: 500;
 }
 
 .root-drop-zone:hover {
@@ -153,22 +156,17 @@ display: block;
 }
 
 .root-drop-zone.drag-over {
-    min-height: 48px;
+    min-height: 40px;
     border-color: #10b981;
     background-color: #d1fae5;
     border-style: solid;
-}
-
-.root-drop-zone .zone-label {
-    font-size: 11px;
-    color: #9ca3af;
-    font-weight: 500;
-    pointer-events: none;
-}
-
-.root-drop-zone.drag-over .zone-label {
     color: #059669;
     font-weight: bold;
+}
+
+/* 隐藏时的根目录放置区 */
+.root-drop-zone.hidden {
+    display: none;
 }
 
 /* 拖拽中的组节点样式 */
@@ -185,9 +183,75 @@ display: block;
     border-radius: 8px;
 }
 
+/* 批量模式下选中的组节点样式 */
+.group-node.ring-2 {
+    border-radius: 6px;
+    margin: 2px 0;
+}
+
+/* 批量模式下 group-header 的样式 */
+.group-header.batch-mode {
+    transition: background-color 0.15s ease;
+}
+
+.group-header.batch-mode:hover {
+    background-color: rgba(59, 130, 246, 0.1);
+}
+
+/* 批量模式下禁用 header 内部文本和图标的选择，方便拖拽 */
+.group-header.batch-mode .group-name-text,
+.group-header.batch-mode i[data-lucide] {
+    user-select: none;
+    pointer-events: none;
+}
+
+/* 复选框包装器禁用 pointer-events，让拖拽可以穿透 */
+.group-header.batch-mode .batch-checkbox-wrapper {
+    pointer-events: none;
+}
+
+/* 但复选框本身保留 pointer-events，用于点击选中，同时显示拖拽光标 */
+.group-header.batch-mode input[type="checkbox"] {
+    pointer-events: auto;
+    position: relative;
+    z-index: 10;
+    cursor: grab;
+}
+
+.group-header.batch-mode input[type="checkbox"]:active {
+    cursor: grabbing;
+}
+
+/* 只保留按钮的交互 */
+.group-header.batch-mode button {
+    pointer-events: auto;
+}
+
+/* 复选框包装器样式 - 增大点击区域，显示拖拽光标 */
+.batch-checkbox-wrapper {
+    flex-shrink: 0;
+    border-radius: 4px;
+    transition: background-color 0.15s ease;
+    cursor: grab;
+}
+
+.batch-checkbox-wrapper:active {
+    cursor: grabbing;
+}
+
+.batch-checkbox-wrapper:hover {
+    background-color: rgba(59, 130, 246, 0.15);
+}
+
 /* 拖拽时禁止文本选择 */
 .is-dragging * {
     user-select: none !important;
+}
+
+/* 拖拽时选中的组保持高亮 */
+.is-dragging .group-node.ring-2 {
+    opacity: 0.6;
+    background-color: #dbeafe;
 }
 
 /* ========== noUiSlider 自定义样式 (标签数量筛选) ========== */

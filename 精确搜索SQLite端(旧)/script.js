@@ -312,7 +312,7 @@ class GlobalState {
         this.clientId = this.getOrGenerateClientId();
         // 从 LocalStorage 读取当前本地规则版本号
         this.rulesBaseVersion = parseInt(localStorage.getItem(RULES_VERSION_KEY) || '0');
-        // 存储从后端加载并解析后的语义森林规则树结构
+        // 存储从后端加载并解析后的同义词规则树结构
         this.rulesTree = null;
         // 存储冲突节点（循环依赖等问题）
         this.conflictNodes = [];
@@ -357,6 +357,36 @@ class GlobalState {
         // --- 新增：规则树展开状态 ---
         this.expandedGroupIds = this.loadExpandedState(); // 从 sessionStorage 加载展开状态
         this.isTreeDefaultExpanded = true; // 标记是否首次加载（用于默认展开）
+
+        // --- 新增：同义词膨胀功能开关 ---
+        this.isExpansionEnabled = this.loadExpansionState(); // 从 sessionStorage 加载，默认开启
+    }
+
+    /**
+     * 从 sessionStorage 加载膨胀功能开关状态
+     * @returns {boolean} 膨胀功能是否启用（默认为 true）
+     */
+    loadExpansionState() {
+        try {
+            const saved = sessionStorage.getItem('bqbq_expansion_enabled');
+            if (saved !== null) {
+                return saved === 'true';
+            }
+        } catch (e) {
+            console.warn('Failed to load expansion state from sessionStorage:', e);
+        }
+        return true; // 默认开启
+    }
+
+    /**
+     * 保存膨胀功能开关状态到 sessionStorage
+     */
+    saveExpansionState() {
+        try {
+            sessionStorage.setItem('bqbq_expansion_enabled', this.isExpansionEnabled.toString());
+        } catch (e) {
+            console.warn('Failed to save expansion state to sessionStorage:', e);
+        }
     }
 
     /**
@@ -469,6 +499,7 @@ class MemeApp {
             rulesPanel: document.getElementById('rules-tree-panel'),
             rulesForceSync: document.getElementById('rules-force-sync'),
             rulesTreeContainer: document.getElementById('rules-tree-container'),
+            rulesPanelToggleBtn: document.getElementById('rules-panel-toggle-btn'),
         };
 
         // Initialize Tag Inputs
@@ -648,6 +679,11 @@ class MemeApp {
      * @returns {Array<string>} 膨胀后的同义词数组（包含原始输入）。
      */
     expandSingleKeyword(inputText) {
+        // 如果膨胀功能关闭，直接返回原始输���
+        if (!this.state.isExpansionEnabled) {
+            return [inputText];
+        }
+
         if (!this.state.rulesTree) return [inputText];
 
         const uniqueKeywords = new Set();
@@ -978,11 +1014,20 @@ class MemeApp {
         // --- 新增：规则树侧边栏事件 ---
         // =========================================================================
 
-        // FAB Tree: 切换侧边栏的显示/隐藏
-
+        // FAB Tree: 切换同义词膨胀功能开关
         this.dom.fabTree.onclick = () => {
-            this.dom.rulesPanel.classList.toggle('-translate-x-full');
+            this.toggleExpansionMode();
         };
+
+        // 初始化膨胀功能按钮的视觉状态
+        this.updateExpansionButtonVisuals();
+
+        // 侧边栏展开/折叠按钮事件（统一按钮）
+        if (this.dom.rulesPanelToggleBtn) {
+            this.dom.rulesPanelToggleBtn.onclick = () => {
+                this.toggleRulesPanel();
+            };
+        }
 
         // Rules Panel Backdrop: 点击侧边栏外部区域（如果实现）或侧边栏内部关闭（如果添加按钮）
 
@@ -1054,6 +1099,10 @@ class MemeApp {
 
         if (expandAllBtn) expandAllBtn.onclick = () => this.expandAllGroups();
         if (collapseAllBtn) collapseAllBtn.onclick = () => this.collapseAllGroups();
+
+        // --- 添加新组按钮事件绑定 ---
+        const addRootGroupBtn = document.getElementById('add-root-group-btn');
+        if (addRootGroupBtn) addRootGroupBtn.onclick = () => this.showAddGroupDialog();
 
         // Rules Tree Toggle: 树状结构节点展开/收起（事件委托）
         this.dom.rulesTreeContainer.addEventListener('click', (e) => {
@@ -1326,6 +1375,94 @@ class MemeApp {
             this.dom.fabTrash.classList.remove('text-red-500', 'bg-red-50', 'border-red-200');
             this.dom.trashDot.classList.add('hidden');
             this.dom.grid.classList.remove('trash-mode-active');
+        }
+    }
+
+    // --- 新增：同义词膨胀功能开关 ---
+
+    /**
+     * 切换同义词膨胀功能的开启/关闭状态
+     */
+    toggleExpansionMode() {
+        this.state.isExpansionEnabled = !this.state.isExpansionEnabled;
+        this.state.saveExpansionState();
+        this.updateExpansionButtonVisuals();
+
+        // 显示状态提示
+        const statusText = this.state.isExpansionEnabled ? '同义词膨胀已开启' : '同义词膨胀已关闭';
+        this.showToast(statusText, this.state.isExpansionEnabled ? 'success' : 'info');
+
+        // 如果有搜索条件，重新执行搜索以应用新的膨胀设置
+        if (this.state.queryTags.length > 0) {
+            this.resetSearch();
+        }
+    }
+
+    /**
+     * 更新膨胀功能按钮的视觉状态
+     */
+    updateExpansionButtonVisuals() {
+        const slashEl = document.getElementById('fab-tree-slash');
+
+        if (this.state.isExpansionEnabled) {
+            // 膨胀功能开启：绿色高亮
+            this.dom.fabTree.classList.add('bg-green-100', 'border-green-400', 'text-green-700');
+            this.dom.fabTree.classList.remove('bg-white', 'border-yellow-300', 'text-yellow-600');
+            this.dom.fabTree.title = '同义词膨胀：已开启（点击关闭）';
+            // 隐藏斜杠
+            if (slashEl) {
+                slashEl.classList.add('hidden');
+                slashEl.classList.remove('flex');
+            }
+        } else {
+            // 膨胀功能关闭：白色背景，黄色图标，红色斜杠
+            this.dom.fabTree.classList.remove('bg-green-100', 'border-green-400', 'text-green-700');
+            this.dom.fabTree.classList.add('bg-white', 'border-yellow-300', 'text-yellow-600');
+            this.dom.fabTree.title = '同义词膨胀：已关闭（点击开启）';
+            // 显示斜杠
+            if (slashEl) {
+                slashEl.classList.remove('hidden');
+                slashEl.classList.add('flex');
+            }
+        }
+    }
+
+    /**
+     * 切换侧边栏的显示/隐藏状态
+     * @param {boolean|undefined} forceOpen - 强制打开(true)/关闭(false)，不传则切换
+     */
+    toggleRulesPanel(forceOpen) {
+        const isCurrentlyOpen = !this.dom.rulesPanel.classList.contains('-translate-x-full');
+        const shouldOpen = forceOpen !== undefined ? forceOpen : !isCurrentlyOpen;
+        const toggleBtn = this.dom.rulesPanelToggleBtn;
+        const panelWidth = 288; // w-72 = 18rem = 288px
+
+        if (shouldOpen) {
+            // 打开侧边栏
+            this.dom.rulesPanel.classList.remove('-translate-x-full');
+            if (toggleBtn) {
+                toggleBtn.style.left = `${panelWidth}px`;
+                toggleBtn.title = '关闭同义词规则侧边栏';
+                // 更新图标方向
+                const icon = toggleBtn.querySelector('i');
+                if (icon) {
+                    icon.setAttribute('data-lucide', 'chevron-left');
+                    lucide.createIcons({ nodes: [icon] });
+                }
+            }
+        } else {
+            // 关闭侧边栏
+            this.dom.rulesPanel.classList.add('-translate-x-full');
+            if (toggleBtn) {
+                toggleBtn.style.left = '0px';
+                toggleBtn.title = '打开同义词规则侧边栏';
+                // 更新图标方向
+                const icon = toggleBtn.querySelector('i');
+                if (icon) {
+                    icon.setAttribute('data-lucide', 'chevron-right');
+                    lucide.createIcons({ nodes: [icon] });
+                }
+            }
         }
     }
 
@@ -1811,18 +1948,6 @@ class MemeApp {
 
         container.innerHTML = '';
 
-        // [新增] 在顶部添加根目录放置区
-        const rootDropZone = this.createRootDropZone();
-        container.appendChild(rootDropZone);
-
-        // [新增] 始终在顶部添加"添加新组"按钮
-        const addRootButton = document.createElement('button');
-        addRootButton.id = 'add-root-group-btn';
-        addRootButton.className = 'mb-2 p-2 w-full bg-blue-500 text-white rounded-lg text-sm hover:bg-blue-600 transition flex items-center justify-center gap-2 shadow-md';
-        addRootButton.innerHTML = `<span class="text-lg">+</span> 添加新组`;
-        addRootButton.onclick = () => this.showAddGroupDialog();
-        container.appendChild(addRootButton);
-
         // 标记是否有正常树数据
         const hasTreeData = treeToRender && treeToRender.length > 0;
 
@@ -1857,9 +1982,10 @@ class MemeApp {
                 const isExpanded = expandedIds.has(node.id); // 检查是否已展开
 
                 const groupEl = document.createElement('div');
-                // 冲突节点添加红色边框和背景
+                // 冲突节点添加红色边框和背景，选中状态添加蓝色边框
                 const conflictClass = isConflict ? 'border-2 border-red-400 bg-red-50' : '';
-                groupEl.className = `group-node group relative ${isEnabled ? '' : 'opacity-50 italic'} ${node.isMatch ? 'bg-blue-50 border-blue-400' : ''} ${conflictClass}`;
+                const selectedClass = (isBatchMode && isSelected) ? 'ring-2 ring-blue-500 bg-blue-50' : '';
+                groupEl.className = `group-node group relative ${isEnabled ? '' : 'opacity-50 italic'} ${node.isMatch ? 'bg-blue-50 border-blue-400' : ''} ${conflictClass} ${selectedClass}`;
                 groupEl.dataset.id = node.id;
                 groupEl.dataset.name = node.name || '';  // 处理空名组
 
@@ -1868,15 +1994,19 @@ class MemeApp {
                 this.bindDragEvents(groupEl);
 
                 const header = document.createElement('div');
-                header.className = `group-header flex items-center justify-between p-2 rounded cursor-pointer ${node.isMatch ? 'hover:bg-blue-100' : (isConflict ? 'hover:bg-red-100' : 'hover:bg-slate-100')}`;
+                // 批量模式下 header 保持 cursor-pointer（点击展开/折叠），复选框区域单独设置 cursor-grab
+                const batchModeClass = isBatchMode ? 'batch-mode' : '';
+                header.className = `group-header flex items-center justify-between p-2 rounded cursor-pointer ${batchModeClass} ${node.isMatch ? 'hover:bg-blue-100' : (isConflict ? 'hover:bg-red-100' : 'hover:bg-slate-100')}`;
 
                 const nameDisplay = document.createElement('div');
                 nameDisplay.className = "flex items-center gap-1 font-bold text-sm";
 
-                // 批量编辑模式下添加复选框
+                // 批量编辑模式下添加复选框（增大尺寸和点击区域，避免误触发拖拽）
                 const checkboxHtml = isBatchMode ? `
-                    <input type="checkbox" class="batch-checkbox w-4 h-4 mr-2 accent-blue-600 cursor-pointer"
-                           data-group-id="${node.id}" ${isSelected ? 'checked' : ''} />
+                    <label class="batch-checkbox-wrapper flex items-center justify-center w-7 h-7 -ml-1 mr-1 cursor-pointer">
+                        <input type="checkbox" class="batch-checkbox w-5 h-5 accent-blue-600 cursor-pointer"
+                               data-group-id="${node.id}" ${isSelected ? 'checked' : ''} />
+                    </label>
                 ` : '';
 
                 // 处理空名组和冲突节点：特殊样式标识
@@ -2042,6 +2172,10 @@ class MemeApp {
 
         // 只有有数据时才调用渲染
         if (hasTreeData) {
+            // 添加根目录放置区（小型，只在拖拽时可见）
+            const rootDropZone = this.createRootDropZone();
+            container.appendChild(rootDropZone);
+
             renderRecursive(treeToRender, container, 0);
         }
 
@@ -2255,6 +2389,11 @@ class MemeApp {
             el.classList.add('dragging');
             document.body.classList.add('is-dragging');
 
+            // 显示根目录放置区
+            document.querySelectorAll('.root-drop-zone').forEach(zone => {
+                zone.classList.remove('hidden');
+            });
+
             // 批量模式下给所有选中的组添加视觉反馈
             if (this.state.batchEditMode && dragIds.length > 1) {
                 dragIds.forEach(id => {
@@ -2286,6 +2425,11 @@ class MemeApp {
             });
             document.querySelectorAll('.group-node.drop-target-child').forEach(node => {
                 node.classList.remove('drop-target-child');
+            });
+
+            // 隐藏根目录放置区
+            document.querySelectorAll('.root-drop-zone').forEach(zone => {
+                zone.classList.add('hidden');
             });
         });
 
@@ -2393,13 +2537,14 @@ class MemeApp {
     }
 
     /**
-     * [新增] 创建根目录放置区
+     * [新增] 创建根目录放置区（紧凑设计，仅拖拽时显示）
      * @returns {HTMLElement} 根目录放置区元素
      */
     createRootDropZone() {
         const zone = document.createElement('div');
-        zone.className = 'root-drop-zone';
-        zone.innerHTML = '<span class="zone-label">📁 拖拽至此移至根目录</span>';
+        // 默认隐藏，通过 CSS .is-dragging 类控制显示
+        zone.className = 'root-drop-zone hidden';
+        zone.innerHTML = '<span class="text-xs">📁 移至根目录</span>';
 
         zone.addEventListener('dragover', (e) => {
             e.preventDefault();
@@ -2432,16 +2577,11 @@ class MemeApp {
 
     /**
      * [新增] 批量处理层级关系的修改(支持批量拖拽)。
-     * 使用后端批量接口，一次请求完成所有移动操作。
+     * 使用统一的 handleSave 方法处理版本控制和冲突。
      * @param {number} parentId - 目标父组 ID (0 代表根节点)。
      * @param {number[]} childIds - 被拖拽的子组 ID 数组。
      */
     async handleBatchHierarchyChange(parentId, childIds) {
-        // 单个组的情况，调用原有方法
-        if (childIds.length === 1) {
-            return this.handleHierarchyChange(parentId, childIds[0]);
-        }
-
         // 防止重复触发
         if (this._isHandlingHierarchyChange) {
             console.log('[handleBatchHierarchyChange] 已在处理中，跳过重复调用');
@@ -2450,7 +2590,7 @@ class MemeApp {
         this._isHandlingHierarchyChange = true;
 
         try {
-            // ★ 关键修复：前端循环检测（批量版本）
+            // ★ 前端循环检测
             const cycleErrors = [];
             for (const childId of childIds) {
                 if (this.wouldCreateCycle(parentId, childId)) {
@@ -2465,37 +2605,29 @@ class MemeApp {
 
             this.showToast(`正在移动 ${childIds.length} 个组...`, 'info');
 
-            // 使用后端批量移动接口
-            const payload = {
-                parent_id: parentId,
-                child_ids: childIds,
-                base_version: this.state.rulesBaseVersion,
-                client_id: this.state.clientId
-            };
-
-            const response = await fetch('/api/rules/hierarchy/batch_move', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            });
-
-            const result = await response.json();
-
-            if (response.status === 409) {
-                // 版本冲突，重新加载规则树
-                this.showToast('版本冲突，正在重新加载...', 'warning');
-                await this.loadRulesTree(true);
-                return;
+            // ★ 乐观更新：先清空选中状态，这样 handleSave 内部渲染时就是正确的状态
+            const previousSelectedIds = this.state.batchEditMode ? new Set(this.state.selectedGroupIds) : null;
+            if (this.state.batchEditMode) {
+                this.state.selectedGroupIds.clear();
+                this.updateBatchToolbarUI();
             }
 
-            if (result.success) {
-                // 更新本地版本号
-                if (result.version_id) {
-                    this.state.rulesBaseVersion = result.version_id;
-                }
+            // ★ 使用统一的 handleSave 方法处理版本控制
+            const action = {
+                url: '/api/rules/hierarchy/batch_move',
+                method: 'POST',
+                type: 'hierarchy/batch_move'
+            };
+            const payload = {
+                parent_id: parentId,
+                child_ids: childIds
+            };
 
-                const movedCount = result.moved || 0;
-                const errors = result.errors || [];
+            const result = await this.handleSave(action, payload);
+
+            if (result.success) {
+                const movedCount = result.new_id?.moved || childIds.length;
+                const errors = result.new_id?.errors || [];
 
                 if (errors.length === 0) {
                     this.showToast(`已移动 ${movedCount} 个组`, 'success');
@@ -2503,17 +2635,27 @@ class MemeApp {
                     this.showToast(`移动完成：${movedCount} 成功，${errors.length} 失败`, 'warning');
                     console.log('[handleBatchHierarchyChange] 部分失败:', errors);
                 }
-
-                // 刷新规则树
-                await this.loadRulesTree(true);
-
-                // 清空批量选择
-                if (this.state.batchEditMode) {
-                    this.state.selectedGroupIds.clear();
-                    this.updateBatchToolbarUI();
-                }
+                // 选中状态已在上面清空
             } else {
-                this.showToast(`移动失败: ${result.error || '未知错误'}`, 'error');
+                // 全部失败时显示具体错误并恢复选中状态
+                const errors = result.new_id?.errors || [];
+                if (errors.length > 0) {
+                    // 提取错误原因
+                    const cycleErrors = errors.filter(e => e.error === 'Would create cycle');
+                    if (cycleErrors.length === errors.length) {
+                        this.showToast(`❌ 移动失败：会形成循环依赖`, 'error');
+                    } else {
+                        this.showToast(`❌ 移动失败：${errors.length} 个错误`, 'error');
+                    }
+                    console.error('[handleBatchHierarchyChange] 全部失败:', errors);
+                }
+
+                // 恢复之前的选中状态
+                if (previousSelectedIds && previousSelectedIds.size > 0) {
+                    this.state.selectedGroupIds = previousSelectedIds;
+                    this.updateBatchToolbarUI();
+                    this.renderRulesTree(true);
+                }
             }
 
         } catch (error) {
@@ -2580,100 +2722,16 @@ class MemeApp {
     }
 
     /**
-     * [优化] 处理层级关系的修改(拖拽成功)。
-     * 先移除子组的所有现有父节点,再建立新的父子关系。
+     * [优化] 处理单个层级关系的修改(拖拽成功)。
+     * 此方法已废弃，保留仅为兼容性。所有调用都会转发到 handleBatchHierarchyChange。
      * @param {number} parentId - 目标父组 ID (0 代表根节点)。
      * @param {number} childId - 被拖拽的子组 ID。
+     * @deprecated 使用 handleBatchHierarchyChange(parentId, [childId]) 代替
      */
     async handleHierarchyChange(parentId, childId) {
-        // 防止重复触发：如果正在处理拖拽，直接返回
-        if (this._isHandlingHierarchyChange) {
-            console.log('[handleHierarchyChange] 已在处理中，跳过重复调用');
-            return;
-        }
-        this._isHandlingHierarchyChange = true;
-
-        try {
-            // ★ 关键修复：前端循环检测（在任何操作前检查）
-            if (this.wouldCreateCycle(parentId, childId)) {
-                this.showToast('❌ 无法移动：这会形成循环依赖！', 'error');
-                console.error(`[handleHierarchyChange] 循环检测：将节点 ${childId} 移到 ${parentId} 下会形成环路`);
-                return;
-            }
-
-            // 1. 查找子组的直接父节点（修复：只找直接父节点，不是所有祖先）
-            const findDirectParents = (tree, targetId) => {
-                const parents = [];
-                const traverse = (nodes) => {
-                    nodes.forEach(node => {
-                        // 检查当前节点的 children 是否直接包含目标节点
-                        const isDirectParent = node.children.some(child => child.id === targetId);
-                        if (isDirectParent) {
-                            parents.push(node.id);
-                        }
-                        // 继续递归遍历
-                        traverse(node.children);
-                    });
-                };
-                traverse(tree);
-                return parents;
-            };
-
-            const existingParents = findDirectParents(this.state.rulesTree, childId);
-            console.log(`[handleHierarchyChange] 子节点 ${childId} 的直接父节点:`, existingParents);
-
-            // 如果目标父节点已经是现有父节点之一，无需操作
-            if (existingParents.includes(parentId)) {
-                this.showToast('该组已在目标位置', 'info');
-                return;
-            }
-
-            // 2. 依次移除所有现有父子关系
-            for (const oldParentId of existingParents) {
-                const removeAction = {
-                    url: '/api/rules/hierarchy/remove',
-                    method: 'POST',
-                    type: 'hierarchy/remove'
-                };
-                const removePayload = {
-                    parent_id: oldParentId,
-                    child_id: childId
-                };
-                const removeResult = await this.handleSave(removeAction, removePayload);
-                if (!removeResult.success) {
-                    this.showToast(`移除旧关系失败 (父节点 ${oldParentId})`, 'error');
-                    return;
-                }
-            }
-
-            // 3. 建立新的父子关系 (如果目标不是根节点)
-            if (parentId !== 0) {
-                const addAction = {
-                    url: '/api/rules/hierarchy/add',
-                    method: 'POST',
-                    type: 'hierarchy/add'
-                };
-                const addPayload = {
-                    parent_id: parentId,
-                    child_id: childId
-                };
-                const addResult = await this.handleSave(addAction, addPayload);
-
-                if (addResult.success) {
-                    this.showToast(`已移动到组 ${parentId}`, 'success');
-                } else if (addResult.error && addResult.error.includes("Cannot create cycle")) {
-                    this.showToast('保存失败：无法形成循环引用。', 'error');
-                } else {
-                    this.showToast('层级更新失败：请刷新重试。', 'error');
-                }
-            } else {
-                // 移动到根节点：只需移除所有父关系即可
-                this.showToast(`已移动到根目录`, 'success');
-            }
-        } finally {
-            // 确保标志位被重置
-            this._isHandlingHierarchyChange = false;
-        }
+        // 直接调用批量处理方法（传入单个元素的数组）
+        // 注意：handleBatchHierarchyChange 已移除对此方法的回调，避免循环
+        return this.handleBatchHierarchyChange(parentId, [childId]);
     }
 
     /**
@@ -2683,6 +2741,11 @@ class MemeApp {
      * @param {HTMLElement} childrenContainer - 子节点容器 (用于显示和添加新组)。
      */
     startChildGroupAdd(parentId, keywordsContainer, childrenContainer) {
+        // 检查是否已有编辑框存在，避免重复点击
+        if (childrenContainer.querySelector('.child-group-add-wrapper')) {
+            return;
+        }
+
         // 确保子节点容器可见
         if (keywordsContainer) keywordsContainer.classList.add('hidden');
         childrenContainer.classList.remove('hidden');
@@ -2911,9 +2974,8 @@ class MemeApp {
      */
     showAddGroupDialog() {
         const container = document.getElementById('rules-tree-container');
-        const addButton = document.getElementById('add-root-group-btn');
 
-        if (!container || !addButton) return;
+        if (!container) return;
 
         // 检查是否已有编辑框存在
         if (container.querySelector('.new-group-editor')) {
@@ -2946,8 +3008,8 @@ class MemeApp {
         editorWrapper.appendChild(input);
         editorWrapper.appendChild(actionBtns);
 
-        // 插入到添加按钮之后
-        addButton.after(editorWrapper);
+        // 插入到规则树容器的顶部
+        container.insertBefore(editorWrapper, container.firstChild);
         input.focus();
 
         // 清理函数
@@ -2992,7 +3054,7 @@ class MemeApp {
 
         // 点击外部关闭
         const handleClickOutside = (e) => {
-            if (!editorWrapper.contains(e.target) && e.target !== addButton) {
+            if (!editorWrapper.contains(e.target) && e.target.id !== 'add-root-group-btn') {
                 cleanup();
                 document.removeEventListener('click', handleClickOutside);
             }
@@ -3371,6 +3433,15 @@ class MemeApp {
         if (actionType.includes('hierarchy')) {
             // 层级操作：确保父子组都存在
             const parentExists = payload.parent_id === 0 || findNode(newRulesTree, payload.parent_id);
+
+            // 支持批量移动（child_ids 数组）
+            if (payload.child_ids && Array.isArray(payload.child_ids)) {
+                // 批量移动：检查所有子组是否存在
+                const allChildrenExist = payload.child_ids.every(childId => findNode(newRulesTree, childId));
+                return !!parentExists && allChildrenExist;
+            }
+
+            // 单个移动（child_id）
             const childExists = findNode(newRulesTree, payload.child_id);
             return !!parentExists && !!childExists;
         }

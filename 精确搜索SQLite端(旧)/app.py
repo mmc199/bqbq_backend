@@ -194,7 +194,8 @@ class MemeService:
         """
         检测添加 parent_id -> child_id 关系是否会形成环路。
 
-        算法：从 child_id 开始，沿着 parent 方向 DFS，如果能走到 parent_id，则形成环。
+        算法：从 parent_id 开始，沿着 parent 方向 DFS，如果能走到 child_id，
+        说明 child_id 是 parent_id 的祖先，添加此关系会形成环。
 
         Args:
             conn: 数据库连接
@@ -210,9 +211,9 @@ class MemeService:
         visited = set()
 
         def dfs(current_node):
-            """从 current_node 向上查找所有父节点"""
-            if current_node == parent_id:
-                return True  # 找到目标节点，形成环
+            """从 current_node 向上查找所有父节点，检测是否能到达 child_id"""
+            if current_node == child_id:
+                return True  # 找到 child_id，说明它是祖先，会形成环
 
             if current_node in visited:
                 return False  # 已访问过，避免无限循环
@@ -232,8 +233,8 @@ class MemeService:
 
             return False
 
-        # 从 child_id 开始向上查找
-        return dfs(child_id)
+        # 从 parent_id 开始向上查找，检测 child_id 是否是其祖先
+        return dfs(parent_id)
 
     @staticmethod
     def add_hierarchy(parent_id, child_id):
@@ -1208,12 +1209,18 @@ def api_batch_move_hierarchy():
 
     # 从 new_id 中提取移动结果
     move_result = result.get('new_id', {"moved": 0, "errors": []})
+    moved_count = move_result.get('moved', 0)
+    errors = move_result.get('errors', [])
+
+    # 修复：当所有操作都失败时（moved=0），返回 success=false
+    # 只有至少成功移动一个时才算成功
+    is_success = result['success'] and moved_count > 0
 
     return jsonify({
-        "success": result['success'],
+        "success": is_success,
         "version_id": result.get('version_id'),
-        "moved": move_result.get('moved', 0),
-        "errors": move_result.get('errors', [])
+        "moved": moved_count,
+        "errors": errors
     })
 
 @app.route('/api/meta/tags')
