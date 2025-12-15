@@ -750,8 +750,10 @@ class MemeService:
         1. 并行处理文件（MD5计算、缩略图生成）
         2. 批量数据库插入
         3. 移除无意义的空标签索引调用
+        4. 线程安全的计数器和文件操作
         """
         import glob
+        import threading
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         print("[Folder Scan] Starting automatic import from meme_images folder...")
@@ -789,38 +791,71 @@ class MemeService:
             # 同时获取 md5 -> filename 的映射用于重命名检查
             md5_to_filename = {row['md5']: row['filename'] for row in conn.execute("SELECT md5, filename FROM images").fetchall()}
 
-        imported_count = 0
-        skipped_count = 0
-        error_count = 0
-        renamed_count = 0
+        # 线程安全的计数器（在主线程中更新，无需锁）
+        counters = {'skipped': 0, 'renamed': 0, 'error': 0}
 
-        # 用于批量插入的数据列表
+        # 文件操作锁（防止重命名冲突）
+        file_op_lock = threading.Lock()
+
+        # 用于批量插入的数据列表（在主线程中更新，无需锁）
         batch_insert_data = []
-        # 用于并行生成缩略图的任务列表
-        thumbnail_tasks = []
+
+        def safe_rename(src, dst):
+            """线程安全的重命名操作，处理 TOCTOU 竞态条件"""
+            try:
+                os.rename(src, dst)
+                return True
+            except FileExistsError:
+                # 目标文件已存在（另一个线程先完成了重命名）
+                return False
+            except FileNotFoundError:
+                # 源文件不存在（已被另一个线程处理）
+                return False
+            except OSError as e:
+                print(f"[Folder Scan] Rename failed {src} -> {dst}: {e}")
+                return False
+
+        def safe_remove(path):
+            """线程安全的删除操作"""
+            try:
+                os.remove(path)
+                return True
+            except FileNotFoundError:
+                # 文件已被删除
+                return True
+            except OSError as e:
+                print(f"[Folder Scan] Remove failed {path}: {e}")
+                return False
 
         def process_single_file(file_path):
             """处理单个文件：计算MD5、重命名、获取尺寸"""
-            nonlocal skipped_count, renamed_count, error_count
-
             try:
-                # 计算文件 MD5
-                with open(file_path, 'rb') as f:
-                    file_data = f.read()
-                    md5 = hashlib.md5(file_data).hexdigest()
+                # 检查文件是否还存在（可能被其他线程处理了）
+                if not os.path.exists(file_path):
+                    return ('skipped', None)
 
+                # 计算文件 MD5
+                try:
+                    with open(file_path, 'rb') as f:
+                        file_data = f.read()
+                except (FileNotFoundError, PermissionError) as e:
+                    # 文件被删除或被占用
+                    return ('skipped', None)
+
+                md5 = hashlib.md5(file_data).hexdigest()
                 current_filename = os.path.basename(file_path)
 
-                # 检查是否已存在
+                # 检查是否已存在于数据库
                 if md5 in existing_md5s:
                     # 检查是否需要重命名
                     expected_filename = md5_to_filename.get(md5)
                     if expected_filename and current_filename != expected_filename:
                         new_path = os.path.join(img_folder, expected_filename)
-                        if not os.path.exists(new_path):
-                            os.rename(file_path, new_path)
-                            renamed_count += 1
-                    return None  # 已存在，跳过
+                        with file_op_lock:
+                            if not os.path.exists(new_path):
+                                if safe_rename(file_path, new_path):
+                                    return ('renamed', None)
+                    return ('skipped', None)
 
                 # 新文件处理
                 ext = os.path.splitext(file_path)[1].lower() or '.jpg'
@@ -829,12 +864,14 @@ class MemeService:
 
                 # 重命名为标准格式
                 if file_path != standard_path:
-                    if os.path.exists(standard_path):
-                        # 目标文件已存在，删除当前重复文件
-                        os.remove(file_path)
-                        return None  # 重复文件，跳过
-                    else:
-                        os.rename(file_path, standard_path)
+                    with file_op_lock:
+                        if os.path.exists(standard_path):
+                            # 目标文件已存在，删除当前重复文件
+                            safe_remove(file_path)
+                            return ('skipped', None)
+                        else:
+                            if not safe_rename(file_path, standard_path):
+                                return ('error', None)
 
                 # 获取图片尺寸
                 try:
@@ -844,9 +881,13 @@ class MemeService:
                     w, h = 0, 0
 
                 file_size = len(file_data)
-                file_mtime = os.path.getmtime(standard_path)
 
-                return {
+                try:
+                    file_mtime = os.path.getmtime(standard_path)
+                except OSError:
+                    file_mtime = time.time()
+
+                return ('new', {
                     'md5': md5,
                     'filename': standard_filename,
                     'path': standard_path,
@@ -854,18 +895,22 @@ class MemeService:
                     'height': h,
                     'size': file_size,
                     'mtime': file_mtime
-                }
+                })
 
             except Exception as e:
                 print(f"[Folder Scan] Error processing {file_path}: {e}")
-                return 'error'
+                return ('error', None)
 
         def generate_thumbnail(item):
             """生成单个缩略图"""
-            thumb_filename = f"{item['md5']}_thumbnail.jpg"
-            thumb_path = os.path.join(FOLDERS['thumb'], thumb_filename)
-            MemeService._create_thumbnail_file(item['path'], thumb_path)
-            return item['md5']
+            try:
+                thumb_filename = f"{item['md5']}_thumbnail.jpg"
+                thumb_path = os.path.join(FOLDERS['thumb'], thumb_filename)
+                MemeService._create_thumbnail_file(item['path'], thumb_path)
+                return True
+            except Exception as e:
+                print(f"[Folder Scan] Thumbnail error for {item['md5']}: {e}")
+                return False
 
         # 第二阶段：并行处理文件（MD5计算、重命名、尺寸获取）
         print("[Folder Scan] Phase 1: Processing files (MD5, rename, dimensions)...")
@@ -879,52 +924,75 @@ class MemeService:
             processed = 0
             for future in as_completed(futures):
                 processed += 1
-                result = future.result()
+                file_path = futures[future]
 
-                if result is None:
-                    skipped_count += 1
-                elif result == 'error':
-                    error_count += 1
-                else:
-                    batch_insert_data.append(result)
-                    thumbnail_tasks.append(result)
+                try:
+                    status, data = future.result()
+                except Exception as e:
+                    # 捕获线程中未预期的异常
+                    print(f"[Folder Scan] Unexpected error for {file_path}: {e}")
+                    status, data = 'error', None
+
+                # 更新计数器（主线程中操作，无需锁）
+                if status == 'skipped':
+                    counters['skipped'] += 1
+                elif status == 'renamed':
+                    counters['renamed'] += 1
+                elif status == 'error':
+                    counters['error'] += 1
+                elif status == 'new' and data:
+                    batch_insert_data.append(data)
 
                 # 每处理100个文件输出一次进度
                 if processed % 100 == 0:
                     print(f"[Folder Scan] Progress: {processed}/{total_files} files processed...")
 
         # 第三阶段：批量插入数据库
+        imported_count = 0
         if batch_insert_data:
             print(f"[Folder Scan] Phase 2: Batch inserting {len(batch_insert_data)} records to database...")
 
-            with MemeService.get_conn() as conn:
-                conn.executemany(
-                    "INSERT INTO images (md5, filename, created_at, width, height, size) VALUES (?, ?, ?, ?, ?, ?)",
-                    [(item['md5'], item['filename'], item['mtime'], item['width'], item['height'], item['size'])
-                     for item in batch_insert_data]
-                )
-                conn.commit()
-
-            imported_count = len(batch_insert_data)
+            try:
+                with MemeService.get_conn() as conn:
+                    conn.executemany(
+                        "INSERT INTO images (md5, filename, created_at, width, height, size) VALUES (?, ?, ?, ?, ?, ?)",
+                        [(item['md5'], item['filename'], item['mtime'], item['width'], item['height'], item['size'])
+                         for item in batch_insert_data]
+                    )
+                    conn.commit()
+                imported_count = len(batch_insert_data)
+            except Exception as e:
+                print(f"[Folder Scan] Database insert error: {e}")
+                counters['error'] += len(batch_insert_data)
 
         # 第四阶段：并行生成缩略图
-        if thumbnail_tasks:
-            print(f"[Folder Scan] Phase 3: Generating {len(thumbnail_tasks)} thumbnails in parallel...")
+        thumbnail_errors = 0
+        if batch_insert_data:
+            print(f"[Folder Scan] Phase 3: Generating {len(batch_insert_data)} thumbnails in parallel...")
 
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = [executor.submit(generate_thumbnail, item) for item in thumbnail_tasks]
+                futures = [executor.submit(generate_thumbnail, item) for item in batch_insert_data]
 
                 completed = 0
                 for future in as_completed(futures):
                     completed += 1
+                    try:
+                        if not future.result():
+                            thumbnail_errors += 1
+                    except Exception as e:
+                        print(f"[Folder Scan] Thumbnail generation exception: {e}")
+                        thumbnail_errors += 1
+
                     if completed % 100 == 0:
-                        print(f"[Folder Scan] Thumbnails: {completed}/{len(thumbnail_tasks)} generated...")
+                        print(f"[Folder Scan] Thumbnails: {completed}/{len(batch_insert_data)} generated...")
 
         print(f"\n[Folder Scan] Summary:")
         print(f"  - Imported: {imported_count}")
-        print(f"  - Skipped (already in DB): {skipped_count}")
-        print(f"  - Renamed: {renamed_count}")
-        print(f"  - Errors: {error_count}")
+        print(f"  - Skipped (already in DB): {counters['skipped']}")
+        print(f"  - Renamed: {counters['renamed']}")
+        print(f"  - Errors: {counters['error']}")
+        if thumbnail_errors > 0:
+            print(f"  - Thumbnail errors: {thumbnail_errors}")
         print(f"[Folder Scan] Automatic import completed.\n")
 
 # Initialize DB (轻量操作，可在模块级别执行)
