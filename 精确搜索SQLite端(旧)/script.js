@@ -481,6 +481,8 @@ class MemeApp {
             fabSort: document.getElementById('fab-sort'),
             fabTrash: document.getElementById('fab-trash'),
             fabTemp: document.getElementById('fab-temp-tags'),
+            fabTempSlash: document.getElementById('fab-temp-tags-slash'), // 临时标签按钮斜杠
+            toggleTempPanelBtn: document.getElementById('toggle-temp-panel-btn'), // 临时标签面板显示/隐藏按钮
             fabTagCount: document.getElementById('fab-tag-count'), // 新增：标签数量筛选按钮
             btnClearSearch: document.getElementById('clear-search-btn'),
 
@@ -984,15 +986,22 @@ class MemeApp {
 
         this.dom.fabTemp.onclick = () => {
             this.state.isTempTagMode = !this.state.isTempTagMode;
-            if (this.state.isTempTagMode) {
-                this.dom.tempPanel.classList.remove('hidden');
-                this.dom.tempPanel.classList.add('flex');
-                this.dom.fabTemp.classList.add('bg-purple-100', 'border-purple-300');
-                this.tempTagInput.focus();
-            } else {
+            this.updateTempTagModeVisuals();
+            // 显示状态提示
+            const statusText = this.state.isTempTagMode ? '已进入批量打标模式' : '已退出批量打标模式';
+            this.showToast(statusText, this.state.isTempTagMode ? 'success' : 'info');
+        };
+
+        // --- 新增：临时标签面板显示/隐藏按钮事件 ---
+        this.dom.toggleTempPanelBtn.onclick = () => {
+            const isOpen = !this.dom.tempPanel.classList.contains('hidden');
+            if (isOpen) {
                 this.dom.tempPanel.classList.add('hidden');
                 this.dom.tempPanel.classList.remove('flex');
-                this.dom.fabTemp.classList.remove('bg-purple-100', 'border-purple-300');
+            } else {
+                this.dom.tempPanel.classList.remove('hidden');
+                this.dom.tempPanel.classList.add('flex');
+                this.tempTagInput.focus();
             }
         };
 
@@ -1024,6 +1033,9 @@ class MemeApp {
 
         // 初始化膨胀功能按钮的视觉状态
         this.updateExpansionButtonVisuals();
+
+        // 初始化临时标签模式按钮的视觉状态
+        this.updateTempTagModeVisuals();
 
         // 侧边栏展开/折叠按钮事件（统一按钮）
         if (this.dom.rulesPanelToggleBtn) {
@@ -1144,7 +1156,10 @@ class MemeApp {
         });
 
         // --- Temp Panel Logic ---
-        document.getElementById('close-temp-panel').onclick = () => this.dom.fabTemp.click();
+        document.getElementById('close-temp-panel').onclick = () => {
+            this.dom.tempPanel.classList.add('hidden');
+            this.dom.tempPanel.classList.remove('flex');
+        };
         document.getElementById('clear-temp-tags').onclick = () => {
             this.tempTagInput.clear();
         };
@@ -1422,6 +1437,35 @@ class MemeApp {
             this.dom.fabTree.classList.remove('bg-green-100', 'border-green-400', 'text-green-700');
             this.dom.fabTree.classList.add('bg-white', 'border-yellow-300', 'text-yellow-600');
             this.dom.fabTree.title = '同义词膨胀：已关闭（点击开启）';
+            // 显示斜杠
+            if (slashEl) {
+                slashEl.classList.remove('hidden');
+                slashEl.classList.add('flex');
+            }
+        }
+    }
+
+    /**
+     * 更新临时标签模式按钮的视觉状态
+     */
+    updateTempTagModeVisuals() {
+        const slashEl = this.dom.fabTempSlash;
+
+        if (this.state.isTempTagMode) {
+            // 批量打标模式开启：紫色高亮
+            this.dom.fabTemp.classList.add('bg-purple-100', 'border-purple-400', 'text-purple-700');
+            this.dom.fabTemp.classList.remove('bg-white', 'border-purple-100', 'text-purple-600');
+            this.dom.fabTemp.title = '批量打标粘贴模式：已开启（点击关闭）';
+            // 隐藏斜杠
+            if (slashEl) {
+                slashEl.classList.add('hidden');
+                slashEl.classList.remove('flex');
+            }
+        } else {
+            // 批量打标模式关闭：白色背景，紫色图标，红色斜杠
+            this.dom.fabTemp.classList.remove('bg-purple-100', 'border-purple-400', 'text-purple-700');
+            this.dom.fabTemp.classList.add('bg-white', 'border-purple-100', 'text-purple-600');
+            this.dom.fabTemp.title = '批量打标粘贴模式：已关闭（点击开启）';
             // 显示斜杠
             if (slashEl) {
                 slashEl.classList.remove('hidden');
