@@ -286,6 +286,9 @@ class TagInput {
         });
 
         this.container.appendChild(this.input);
+
+        // 当有标签时隐藏 placeholder，节省空间
+        this.input.placeholder = this.tags.length > 0 ? '' : this.placeholder;
     }
     
     // External Setters
@@ -1759,22 +1762,27 @@ class MemeApp {
         const totalExpandedExcludes = expandedExcludesGroups.reduce((sum, g) => sum + g.length, 0);
         const totalExpandedAndExcludes = synonymExcludeAndGroups.reduce((sum, capsule) =>
             sum + capsule.reduce((s, g) => s + g.length, 0), 0);
-        const totalOriginalIncludes = normalIncludes.length + synonymIncludes.length;
-        const totalOriginalExcludes = normalExcludes.length + synonymExcludes.length;
 
-        // 用户反馈：显示膨胀信息
-        if (totalOriginalIncludes > 0 && totalExpandedIncludes > totalOriginalIncludes) {
-            console.log(`[关键词膨胀] 包含: ${totalOriginalIncludes} 个标签 → ${totalExpandedIncludes} 个关键词`);
-            this.showExpandedKeywordsBadge(totalOriginalIncludes, totalExpandedIncludes);
+        // 统计原始标签数（所有种类）
+        const totalOriginalIncludes = normalIncludes.length + synonymIncludes.reduce((sum, t) => sum + t.synonymWords.length, 0);
+        const totalOriginalExcludes = normalExcludes.length + synonymExcludes.reduce((sum, t) => sum + t.synonymWords.length, 0);
+
+        // 合计所有种类的原始和膨胀数量
+        const totalOriginal = totalOriginalIncludes + totalOriginalExcludes;
+        const totalExpanded = totalExpandedIncludes + totalExpandedExcludes + totalExpandedAndExcludes;
+
+        // 用户反馈：显示膨胀信息（当有任何膨胀发生时）
+        if (totalOriginal > 0 && totalExpanded > totalOriginal) {
+            console.log(`[关键词膨胀] 总计: ${totalOriginal} 个标签 → ${totalExpanded} 个关键词`);
+            if (totalOriginalIncludes > 0 && totalExpandedIncludes > totalOriginalIncludes) {
+                console.log(`  - 包含: ${totalOriginalIncludes} → ${totalExpandedIncludes}`);
+            }
+            if (totalOriginalExcludes > 0 && (totalExpandedExcludes + totalExpandedAndExcludes) > totalOriginalExcludes) {
+                console.log(`  - 排除: ${totalOriginalExcludes} → ${totalExpandedExcludes + totalExpandedAndExcludes}`);
+            }
+            this.showExpandedKeywordsBadge(totalOriginal, totalExpanded);
         } else {
             this.hideExpandedKeywordsBadge();
-        }
-
-        if (totalOriginalExcludes > 0 && (totalExpandedExcludes + totalExpandedAndExcludes) > totalOriginalExcludes) {
-            console.log(`[关键词膨胀] 排除: ${totalOriginalExcludes} 个标签 → ${totalExpandedExcludes + totalExpandedAndExcludes} 个关键词`);
-            if (synonymExcludeAndGroups.length > 0) {
-                console.log(`[交集排除] ${synonymExcludeAndGroups.length} 个交集排除胶囊`);
-            }
         }
 
         const payload = {
@@ -1818,26 +1826,24 @@ class MemeApp {
     }
 
     /**
-     * [新增] 显示关键词膨胀提示徽章
+     * [重构] 显示关键词膨胀提示徽章（移到 fab-tree 按钮上）
+     * @param {number} original - 原始关键词数量
+     * @param {number} expanded - 膨胀后关键词数量
      */
     showExpandedKeywordsBadge(original, expanded) {
-        let badge = document.getElementById('expanded-keywords-badge');
-        if (!badge) {
-            badge = document.createElement('div');
-            badge.id = 'expanded-keywords-badge';
-            badge.className = 'ml-2 px-2 py-1 bg-purple-100 text-purple-700 text-xs rounded-full font-bold whitespace-nowrap';
-            this.dom.headerSearchBar.parentElement.appendChild(badge);
-        }
-        badge.textContent = `🌳 ${original} → ${expanded} 词`;
+        const badge = document.getElementById('expansion-badge');
+        if (!badge) return;
+
+        badge.textContent = `${original}→${expanded}`;
         badge.title = `原始 ${original} 个关键词已通过规则树膨胀为 ${expanded} 个搜索关键词`;
         badge.classList.remove('hidden');
     }
 
     /**
-     * [新增] 隐藏关键词膨胀提示徽章
+     * [重构] 隐藏关键词膨胀提示徽章
      */
     hideExpandedKeywordsBadge() {
-        const badge = document.getElementById('expanded-keywords-badge');
+        const badge = document.getElementById('expansion-badge');
         if (badge) {
             badge.classList.add('hidden');
         }
@@ -3488,6 +3494,9 @@ class MemeApp {
 
     renderPageBlock(images) {
         const frag = document.createDocumentFragment();
+        // 优化 LCP: 跟踪当前渲染的图片索引，首屏图片不使用懒加载
+        let imageIndex = 0;
+        const EAGER_LOAD_COUNT = 4; // 首屏前 4 张图片使用 eager 加载
 
         images.forEach(img => {
             // 前端过滤：非回收站模式下隐藏带 trash_bin 标签的图片
@@ -3511,9 +3520,11 @@ class MemeApp {
             
             // --- Image Handling ---
             const imgEl = document.createElement('img');
-            // 优化 2. 简化昂贵 CSS: 仅保留 transform 相关的过渡效果
-            imgEl.className = "image-element w-full h-full object-contain transition duration-500 hover:scale-105"; // group-hover:scale-105 依赖于父元素的 group 类
-            imgEl.loading = "lazy";
+            // 优化 LCP: 移除所有动效 (transition, hover:scale)
+            imgEl.className = "image-element w-full h-full object-contain";
+            // 优化 LCP: 首屏图片使用 eager 加载，其余使用 lazy 加载
+            imgEl.loading = imageIndex < EAGER_LOAD_COUNT ? "eager" : "lazy";
+            imageIndex++;
             
             const originalSrc = `/images/${img.filename}`;
             const thumbSrc = `/thumbnails/${img.filename}`;
