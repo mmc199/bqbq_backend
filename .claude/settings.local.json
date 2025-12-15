@@ -12,7 +12,11 @@
       "Task(*)",
       "TodoWrite(*)",
       "NotebookEdit(*)",
-      "Bash(find:*)"
+      "Bash(find:*)",
+      "Bash(dir:*)",
+      "Bash(ls:*)",
+      "Bash(head:*)",
+      "Bash(wc:*)"
     ],
     "deny": []
   }
