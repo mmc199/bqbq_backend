@@ -927,11 +927,8 @@ class MemeService:
         print(f"  - Errors: {error_count}")
         print(f"[Folder Scan] Automatic import completed.\n")
 
-# Initialize DB
+# Initialize DB (轻量操作，可在模块级别执行)
 MemeService.init_db()
-
-# Scan and import existing images from folder
-MemeService.scan_and_import_folder()
 
 # --- Routes ---
 
@@ -1469,4 +1466,14 @@ def api_import_all():
         return jsonify({"success": False, "error": str(e)}), 500
 
 if __name__ == '__main__':
+    # 检查是否是 werkzeug reloader 的子进程
+    # debug 模式下，werkzeug 会启动两个进程，只有 WERKZEUG_RUN_MAIN='true' 的才是实际运行的子进程
+    is_reloader_process = os.environ.get('WERKZEUG_RUN_MAIN') == 'true'
+    is_first_run = not is_reloader_process  # 如果不是 reloader 子进程，说明是首次启动
+
+    # 只在首次启动时扫描文件夹（避免 debug 模式下执行两次）
+    # 或者在非 debug 模式下正常执行
+    if is_first_run:
+        MemeService.scan_and_import_folder()
+
     app.run(host='0.0.0.0', port=5000, debug=True)
