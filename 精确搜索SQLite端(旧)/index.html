@@ -21,7 +21,7 @@
     <!-- Header: 全宽搜索栏 -->
     <header id="app-header" class="min-h-16 bg-white/90 border-b border-slate-200 flex items-center px-4 z-30 shrink-0 gap-2 shadow-sm">
         <!-- Search Container -->
-        <div id="header-search-bar" class="flex-1 flex flex-wrap items-center gap-2 bg-slate-100 rounded-xl px-3 py-2 min-h-[50px] max-h-[120px] overflow-y-auto cursor-text transition-colors hover:bg-slate-50 focus-within:bg-white focus-within:ring-2 focus-within:ring-blue-100 border border-transparent focus-within:border-blue-300 custom-scrollbar">
+        <div id="header-search-bar" class="flex-1 flex flex-wrap items-center gap-2 bg-slate-100 rounded-xl px-3 py-2 min-h-[50px] max-h-[120px] overflow-y-auto cursor-text transition-colors hover:bg-slate-50 focus-within:bg-white focus-within:ring-2 focus-within:ring-blue-100 border border-transparent focus-within:border-blue-300 custom-scrollbar" title="输入标签搜索图片，支持同义词组(逗号分隔)和排除标签(-前缀)">
             <!-- JS will inject TagInput here -->
         </div>
     </header>
@@ -43,6 +43,7 @@
                 list="tree-suggestions"
                 placeholder="🔍 搜索组/关键词..."
                 class="w-full px-3 py-2 pr-8 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-200 focus:border-green-400"
+                title="在同义词规则树中搜索组名或关键词"
             />
             <button
                 id="rules-tree-search-clear"
@@ -79,8 +80,8 @@
             </div>
         </div>
         <div id="rules-panel-footer" class="mt-4 pt-3 border-t border-slate-100 text-xs text-slate-500 flex justify-between items-center">
-            <span id="rules-version-info">V0</span>
-            <button id="rules-force-sync" class="text-blue-500 hover:text-blue-700">强制同步</button>
+            <span id="rules-version-info" title="当前本地规则版本号">V0</span>
+            <button id="rules-force-sync" class="text-blue-500 hover:text-blue-700" title="忽略缓存，从服务器强制重新加载规则树">强制同步</button>
         </div>
     </aside>
 
@@ -114,26 +115,26 @@
     -->
     <div id="temp-tag-panel" class="fixed top-24 right-44 bg-white rounded-xl shadow-2xl border border-slate-200 p-3 z-40 hidden w-64 flex-col gap-2 transform transition-all duration-200 origin-top-right">
         <div class="text-xs font-bold text-slate-500 mb-1 flex justify-between">
-            <span id="temp-panel-title">临时标签 (点击图片粘贴)</span>
-            <span id="close-temp-panel" class="cursor-pointer hover:text-red-500">&times;</span>
+            <span id="temp-panel-title" title="在此输入标签，然后点击图片快速粘贴">临时标签 (点击图片粘贴)</span>
+            <span id="close-temp-panel" class="cursor-pointer hover:text-red-500" title="关闭临时标签面板">&times;</span>
         </div>
-        <div id="temp-tag-input-container" class="flex flex-wrap gap-1 bg-slate-50 p-2 rounded border border-slate-200 min-h-[40px] cursor-text">
+        <div id="temp-tag-input-container" class="flex flex-wrap gap-1 bg-slate-50 p-2 rounded border border-slate-200 min-h-[40px] cursor-text" title="输入要批量粘贴的标签">
            <!-- JS will inject TagInput here -->
         </div>
-        <button id="clear-temp-tags" class="text-xs text-blue-600 hover:underline text-left">清空</button>
+        <button id="clear-temp-tags" class="text-xs text-blue-600 hover:underline text-left" title="清空所有临时标签">清空</button>
     </div>
 
     <!-- Tag Count Filter Panel (Hidden by default) -->
-    <div id="tag-count-panel" class="fixed top-24 right-44 bg-white rounded-xl shadow-2xl border border-slate-200 p-3 z-40 hidden flex-col w-52 origin-top-right">
+    <div id="tag-count-panel" class="fixed top-24 right-44 bg-white rounded-xl shadow-2xl border border-slate-200 p-3 z-40 hidden flex-col w-52 origin-top-right" title="按标签数量筛选图片">
         <!-- 第一行：输入框 + 标题 + 关闭按钮 -->
         <div id="tag-count-header" class="flex items-center justify-between gap-1 mb-2">
-            <input id="input-min-tags" type="number" min="0" value="0" class="w-12 px-1 py-0.5 text-xs border border-slate-200 rounded text-center focus:ring-1 focus:ring-cyan-300 focus:border-cyan-400 outline-none text-slate-600">
-            <span id="tag-count-title" class="text-xs font-bold text-slate-600 flex-1 text-center">标签数</span>
-            <input id="input-max-tags" type="text" value="∞" class="w-12 px-1 py-0.5 text-xs border border-slate-200 rounded text-center focus:ring-1 focus:ring-cyan-300 focus:border-cyan-400 outline-none text-slate-600">
-            <span id="close-tag-count-panel" class="cursor-pointer text-slate-400 hover:text-red-500 text-base ml-1">&times;</span>
+            <input id="input-min-tags" type="number" min="0" value="0" class="w-12 px-1 py-0.5 text-xs border border-slate-200 rounded text-center focus:ring-1 focus:ring-cyan-300 focus:border-cyan-400 outline-none text-slate-600" title="最少标签数">
+            <span id="tag-count-title" class="text-xs font-bold text-slate-600 flex-1 text-center" title="筛选指定标签数量范围的图片">标签数</span>
+            <input id="input-max-tags" type="text" value="∞" class="w-12 px-1 py-0.5 text-xs border border-slate-200 rounded text-center focus:ring-1 focus:ring-cyan-300 focus:border-cyan-400 outline-none text-slate-600" title="最多标签数 (∞ 表示无限制)">
+            <span id="close-tag-count-panel" class="cursor-pointer text-slate-400 hover:text-red-500 text-base ml-1" title="关闭标签数量筛选面板">&times;</span>
         </div>
         <!-- 第二行：滑块 -->
-        <div id="tag-slider" class="mx-1"></div>
+        <div id="tag-slider" class="mx-1" title="拖动滑块调整标签数量范围"></div>
         <span id="tag-count-display" class="hidden">0 - ∞</span>
     </div>
 
@@ -144,12 +145,12 @@
        - Moved left (right-44) to allow space for the button grid.
     -->
     <div id="sort-menu" class="fixed top-24 right-44 bg-white rounded-xl shadow-xl border border-slate-200 py-2 z-40 hidden flex-col w-40 origin-top-right">
-        <button id="sort-date-desc" data-sort="date_desc" class="sort-option px-4 py-2 text-sm text-left hover:bg-slate-50 text-blue-600 font-bold">📅 最新添加</button>
-        <button id="sort-date-asc" data-sort="date_asc" class="sort-option px-4 py-2 text-sm text-left hover:bg-slate-50 text-slate-600">📅 最早添加</button>
-        <button id="sort-size-desc" data-sort="size_desc" class="sort-option px-4 py-2 text-sm text-left hover:bg-slate-50 text-slate-600">💾 文件很大</button>
-        <button id="sort-size-asc" data-sort="size_asc" class="sort-option px-4 py-2 text-sm text-left hover:bg-slate-50 text-slate-600">💾 文件很小</button>
-        <button id="sort-resolution-desc" data-sort="resolution_desc" class="sort-option px-4 py-2 text-sm text-left hover:bg-slate-50 text-slate-600">📐 高分辨率</button>
-        <button id="sort-resolution-asc" data-sort="resolution_asc" class="sort-option px-4 py-2 text-sm text-left hover:bg-slate-50 text-slate-600">📐 低分辨率</button>
+        <button id="sort-date-desc" data-sort="date_desc" class="sort-option px-4 py-2 text-sm text-left hover:bg-slate-50 text-blue-600 font-bold" title="按添加时间降序排列">📅 最新添加</button>
+        <button id="sort-date-asc" data-sort="date_asc" class="sort-option px-4 py-2 text-sm text-left hover:bg-slate-50 text-slate-600" title="按添加时间升序排列">📅 最早添加</button>
+        <button id="sort-size-desc" data-sort="size_desc" class="sort-option px-4 py-2 text-sm text-left hover:bg-slate-50 text-slate-600" title="按文件大小降序排列">💾 文件很大</button>
+        <button id="sort-size-asc" data-sort="size_asc" class="sort-option px-4 py-2 text-sm text-left hover:bg-slate-50 text-slate-600" title="按文件大小升序排列">💾 文件很小</button>
+        <button id="sort-resolution-desc" data-sort="resolution_desc" class="sort-option px-4 py-2 text-sm text-left hover:bg-slate-50 text-slate-600" title="按分辨率(像素数)降序排列">📐 高分辨率</button>
+        <button id="sort-resolution-asc" data-sort="resolution_asc" class="sort-option px-4 py-2 text-sm text-left hover:bg-slate-50 text-slate-600" title="按分辨率(像素数)升序排列">📐 低分辨率</button>
     </div>
 
     <!-- Floating Action Buttons (Stack) -->
@@ -204,14 +205,14 @@
         </button>
 
         <!-- Upload -->
-        <button id="fab-upload" class="w-14 h-14 bg-emerald-500 hover:bg-emerald-600 text-white rounded-2xl shadow-lg hover:shadow-xl hover:scale-105 transition-all flex items-center justify-center group relative">
+        <button id="fab-upload" class="w-14 h-14 bg-emerald-500 hover:bg-emerald-600 text-white rounded-2xl shadow-lg hover:shadow-xl hover:scale-105 transition-all flex items-center justify-center group relative" title="上传新图片">
             <i data-lucide="plus" class="w-7 h-7"></i>
             <input type="file" id="file-upload" class="hidden" multiple accept="image/*">
         </button>
 
         <!-- Main Search (Focus) + Satellites -->
         <div id="search-btn-group" class="relative group">
-            <button id="fab-search" class="w-14 h-14 bg-blue-600 hover:bg-blue-700 text-white rounded-2xl shadow-xl hover:shadow-2xl hover:scale-105 transition-all flex items-center justify-center z-20 relative">
+            <button id="fab-search" class="w-14 h-14 bg-blue-600 hover:bg-blue-700 text-white rounded-2xl shadow-xl hover:shadow-2xl hover:scale-105 transition-all flex items-center justify-center z-20 relative" title="执行搜索">
                 <i data-lucide="search" class="w-7 h-7"></i>
             </button>
 
