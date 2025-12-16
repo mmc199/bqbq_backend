@@ -1393,7 +1393,7 @@ def api_batch_move_hierarchy():
 @app.route('/api/meta/tags')
 def api_tags():
     with MemeService.get_conn() as conn:
-        rows = conn.execute("SELECT name FROM tags_dict ORDER BY use_count DESC LIMIT 1000")
+        rows = conn.execute("SELECT name FROM tags_dict ORDER BY use_count DESC")
         tags = [r[0] for r in rows]
     return jsonify(tags)
 
