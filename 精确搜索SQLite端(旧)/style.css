@@ -40,10 +40,8 @@ background-color: #94a3b8;
     display: none;
 }
 
-/* 内容容器 */
-#rules-tree-container {
-    min-width: max-content; /* 允许内容超出容器宽度，触发水平滚动 */
-}
+/* 内容容器：不设置 min-width: max-content，让胶囊能正常换行 */
+/* 水平滚动仅在单个元素（如组名）超长时触发 */
 
 /* ========== 自定义滚动条（支持 Pointer Capture） ========== */
 
