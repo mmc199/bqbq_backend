@@ -5,6 +5,7 @@ import time
 import sqlite3
 import hashlib
 import random  # 新增: 用于随机抽取帧
+import threading
 from flask import Flask, send_file, send_from_directory, request, jsonify
 from flask_cors import CORS
 from PIL import Image
@@ -1559,6 +1560,28 @@ def api_import_all():
         traceback.print_exc()
         return jsonify({"success": False, "error": str(e)}), 500
 
+
+# --- 定时任务 ---
+def start_tags_dict_updater(interval_seconds=900):
+    """
+    启动后台线程，定时更新 tags_dict。
+
+    Args:
+        interval_seconds: 更新间隔，默认 900 秒（15 分钟）
+    """
+    def loop():
+        while True:
+            time.sleep(interval_seconds)
+            try:
+                MemeService.rebuild_tags_dict()
+            except Exception as e:
+                print(f"[Tags Dict] Scheduled update failed: {e}")
+
+    t = threading.Thread(target=loop, daemon=True, name="TagsDictUpdater")
+    t.start()
+    print(f"[Tags Dict] Scheduled updater started (interval: {interval_seconds}s)")
+
+
 if __name__ == '__main__':
     # 检查是否是 werkzeug reloader 的子进程
     # debug 模式下，werkzeug 会启动两个进程，只有 WERKZEUG_RUN_MAIN='true' 的才是实际运行的子进程
@@ -1568,6 +1591,7 @@ if __name__ == '__main__':
     # 只在首次启动时执行初始化任务（避免 debug 模式下执行两次）
     if is_first_run:
         MemeService.scan_and_import_folder()
-        MemeService.rebuild_tags_dict()  # 重建标签字典
+        MemeService.rebuild_tags_dict()
+        start_tags_dict_updater(900)  # 每 15 分钟更新一次
 
     app.run(host='0.0.0.0', port=5000, debug=True)
