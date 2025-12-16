@@ -17,15 +17,16 @@ border-radius: 99px;
 background-color: #94a3b8;
 }
 
-/* Rules Tree Scroll Wrapper - 外层容器，padding 为滚动条留出空间 */
+/* Rules Tree Scroll Wrapper - 外层容器，为滚动条留出空间 */
 #rules-tree-scroll-wrapper {
     position: relative;
+    z-index: 0; /* 创建独立层叠上下文 */
     display: flex;
     flex-direction: column;
-    overflow: hidden;
-    /* 滚动条区域与内容区域分离，避免触屏重叠 */
-    padding-left: 20px;
-    padding-top: 20px;
+    overflow: visible; /* 允许滚动条溢出到上方 */
+    /* 滚动条在 border 外部，通过 margin 留空间 */
+    margin-top: 20px; /* 给水平滚动条留空间 */
+    padding-left: 20px; /* 给垂直滚动条留空间 */
 }
 
 /* Rules Tree Content - 滚动容器，隐藏原生滚动条 */
@@ -53,17 +54,17 @@ background-color: #94a3b8;
     touch-action: none; /* 启用 Pointer Events */
 }
 
-/* 垂直滚动条 - 左侧 */
+/* 垂直滚动条 - 左侧，在 padding-left 区域内 */
 .custom-scrollbar-v {
     left: 0;
-    top: 20px; /* 给水平滚动条留空间 */
+    top: 0;
     bottom: 0;
     width: 20px;
 }
 
-/* 水平滚动条 - 上方 */
+/* 水平滚动条 - 上方，在 margin-top 区域内（负定位） */
 .custom-scrollbar-h {
-    top: 0;
+    top: -20px; /* 移到 wrapper 上边框上方 */
     left: 20px; /* 给垂直滚动条留空间 */
     right: 0;
     height: 20px;
@@ -128,10 +129,10 @@ background-color: #94a3b8;
     min-width: 30px;
 }
 
-/* 滚动条角落 */
+/* 滚动条角落 - 左上角，匹配滚动条位置 */
 .scrollbar-corner {
     position: absolute;
-    top: 0;
+    top: -20px; /* 匹配水平滚动条位置 */
     left: 0;
     width: 20px;
     height: 20px;

@@ -1740,9 +1740,7 @@ class MemeApp {
 
         // 更新滑块位置和大小
         const updateScrollbars = () => {
-            const contentWidth = container.scrollWidth;
             const contentHeight = container.scrollHeight;
-            const viewportWidth = content.clientWidth;
             const viewportHeight = content.clientHeight;
 
             // 垂直滚动条
@@ -1759,7 +1757,10 @@ class MemeApp {
                 vScrollbar.style.display = 'none';
             }
 
-            // 水平滚动条
+            // 水平滚动条 - 使用 content.scrollWidth
+            const contentWidth = content.scrollWidth;
+            const viewportWidth = content.clientWidth;
+
             if (contentWidth > viewportWidth) {
                 hScrollbar.style.display = 'block';
                 const trackWidth = hScrollbar.clientWidth;
