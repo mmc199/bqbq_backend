@@ -1404,11 +1404,13 @@ class MemeApp {
                 this.startOverlayEdit(tempImgData, cardEl, cardEl.querySelector('.image-overlay'), tagsContainer);
             }
             
-            // --- D. 复制按钮 (Copied button logic from createIconBtn)
+            // --- D. 复制按钮 (复制图片标签)
             if (target.closest('.copy-btn')) {
                  // 找到按钮本身
                 const btnCopy = target.closest('.copy-btn');
-                this.copyText(infoEl.filename, btnCopy);
+                // 获取当前显示的标签，用空格分隔
+                const currentTags = Array.from(tagsContainer.querySelectorAll('.overlay-tag')).map(el => el.textContent);
+                this.copyText(currentTags.join(' '), btnCopy);
             }
 
             // E. 删除/恢复按钮 (Copied button logic from createIconBtn)
