@@ -10,6 +10,8 @@ const TAGS_TIME_KEY = 'bqbq_tag_timestamp';
 
 const RULES_VERSION_KEY = 'bqbq_rules_version'; // 存储规则树的本地版本号
 const CLIENT_ID_KEY = 'bqbq_client_id'; // 存储客户端唯一 ID
+const FAB_COLLAPSED_KEY = 'bqbq_fab_collapsed'; // 存储FAB悬浮按钮组的折叠状态
+const FAB_MINI_POSITION_KEY = 'bqbq_fab_mini_position'; // 存储FAB迷你按钮组的垂直位置
 
 // --- 支持的图片扩展名列表 ---
 const SUPPORTED_EXTENSIONS = ['gif', 'png', 'jpg', 'webp'];
@@ -363,6 +365,73 @@ class GlobalState {
 
         // --- 新增：同义词膨胀功能开关 ---
         this.isExpansionEnabled = this.loadExpansionState(); // 从 sessionStorage 加载，默认开启
+
+        // --- 新增：FAB悬浮按钮组折叠状态 ---
+        this.isFabCollapsed = this.loadFabCollapsedState(); // 从 sessionStorage 加载，默认折叠
+
+        // --- 新增：FAB迷你按钮组垂直位置（距离顶部的像素值，null表示使用默认位置24rem=384px） ---
+        this.fabMiniTopPosition = this.loadFabMiniPosition();
+    }
+
+    /**
+     * 从 sessionStorage 加载FAB迷你按钮组位置
+     * @returns {number|null} 距离顶部的像素值，null表示使用默认位置
+     */
+    loadFabMiniPosition() {
+        try {
+            const saved = sessionStorage.getItem(FAB_MINI_POSITION_KEY);
+            if (saved !== null) {
+                const pos = parseInt(saved, 10);
+                if (!isNaN(pos) && pos >= 0) {
+                    return pos;
+                }
+            }
+        } catch (e) {
+            console.warn('Failed to load FAB mini position from sessionStorage:', e);
+        }
+        return null; // 使用默认位置
+    }
+
+    /**
+     * 保存FAB迷你按钮组位置到 sessionStorage
+     */
+    saveFabMiniPosition() {
+        try {
+            if (this.fabMiniTopPosition !== null) {
+                sessionStorage.setItem(FAB_MINI_POSITION_KEY, this.fabMiniTopPosition.toString());
+            } else {
+                sessionStorage.removeItem(FAB_MINI_POSITION_KEY);
+            }
+        } catch (e) {
+            console.warn('Failed to save FAB mini position to sessionStorage:', e);
+        }
+    }
+
+    /**
+     * 从 sessionStorage 加载FAB折叠状态
+     * @returns {boolean} FAB是否折叠（默认为 true - 折叠）
+     */
+    loadFabCollapsedState() {
+        try {
+            const saved = sessionStorage.getItem(FAB_COLLAPSED_KEY);
+            if (saved !== null) {
+                return saved === 'true';
+            }
+        } catch (e) {
+            console.warn('Failed to load FAB collapsed state from sessionStorage:', e);
+        }
+        return true; // 默认折叠
+    }
+
+    /**
+     * 保存FAB折叠状态到 sessionStorage
+     */
+    saveFabCollapsedState() {
+        try {
+            sessionStorage.setItem(FAB_COLLAPSED_KEY, this.isFabCollapsed.toString());
+        } catch (e) {
+            console.warn('Failed to save FAB collapsed state to sessionStorage:', e);
+        }
     }
 
     /**
@@ -502,9 +571,17 @@ class MemeApp {
             // --- 新增 Rules Tree 相关的 DOM 元素 ---
             fabTree: document.getElementById('fab-tree'),
             rulesPanel: document.getElementById('rules-tree-panel'),
-            rulesForceSync: document.getElementById('rules-force-sync'),
             rulesTreeContainer: document.getElementById('rules-tree-container'),
             rulesPanelToggleBtn: document.getElementById('rules-panel-toggle-btn'),
+
+            // --- 新增 FAB 折叠相关的 DOM 元素 ---
+            fabContainer: document.getElementById('fab-container'),
+            fabMiniStrip: document.getElementById('fab-mini-strip'),
+            fabToggleBtn: document.getElementById('fab-toggle-btn'),
+            fabExpandBtn: document.getElementById('fab-expand-btn'),
+            fabMiniClear: document.getElementById('fab-mini-clear'),
+            fabMiniReload: document.getElementById('fab-mini-reload'),
+            fabMiniSearch: document.getElementById('fab-mini-search'),
         };
 
         // Initialize Tag Inputs
@@ -518,6 +595,14 @@ class MemeApp {
         this.initTagInputs();
         this.updateHQVisuals();
         this.bindEvents(); // All event listeners, including delegated ones
+
+        // --- 初始化FAB折叠状态和位置 ---
+        this.updateFabCollapsedVisuals();
+        this.initFabMiniPosition();
+        this.initFabMiniDrag();
+
+        // --- 初始化规则树水平滚动条同步 ---
+        this.initRulesTreeHScrollSync();
 
         // --- 核心修改：先加载规则树，再加载图片元数据 ---
         await this.loadRulesTree(); // 新增加载规则树的调用
@@ -1005,6 +1090,43 @@ class MemeApp {
             }
         };
 
+        // --- 新增：FAB悬浮按钮组折叠/展开事件 ---
+        if (this.dom.fabToggleBtn) {
+            this.dom.fabToggleBtn.onclick = (e) => {
+                e.stopPropagation();
+                this.toggleFabCollapsed();
+            };
+        }
+
+        // fab-expand-btn 的点击和拖拽事件在 initFabMiniDrag 中统一处理
+
+        // 折叠状态下的迷你按钮事件
+        if (this.dom.fabMiniClear) {
+            this.dom.fabMiniClear.onclick = (e) => {
+                e.stopPropagation();
+                this.headerTagInput.clear();
+                this.state.queryTags = [];
+                this.state.isTrashMode = false;
+                this.updateTrashVisuals();
+                this.doSearch();
+            };
+        }
+
+        if (this.dom.fabMiniReload) {
+            this.dom.fabMiniReload.onclick = (e) => {
+                e.stopPropagation();
+                this.resetSearch();
+            };
+        }
+
+        if (this.dom.fabMiniSearch) {
+            this.dom.fabMiniSearch.onclick = (e) => {
+                e.stopPropagation();
+                this.headerTagInput.focus();
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+            };
+        }
+
         // --- 新增：标签数量筛选按钮事件 ---
         this.dom.fabTagCount.onclick = () => {
             this.state.isTagCountPanelOpen = !this.state.isTagCountPanelOpen;
@@ -1045,20 +1167,6 @@ class MemeApp {
         }
 
         // Rules Panel Backdrop: 点击侧边栏外部区域（如果实现）或侧边栏内部关闭（如果添加按钮）
-
-        // Force Sync Button: 强制重新加载规则树
-        this.dom.rulesForceSync.onclick = async () => {
-            // 强制同步按钮需要重新加载规则树，并忽略 ETag 缓存
-            this.dom.rulesForceSync.innerHTML = SVG_ICONS.loader.replace('w-8 h-8', 'w-4 h-4');
-            
-            // 强制加载规则树（参数设置为 true）
-            await this.loadRulesTree(true); 
-            
-            this.dom.rulesForceSync.textContent = '强制同步';
-            
-            // 自动关闭侧边栏（可选，但通常在同步后保持打开）
-            // this.dom.rulesPanel.classList.add('-translate-x-full');
-        };
 
         // 规则树搜索
         const treeSearchInput = document.getElementById('rules-tree-search');
@@ -1472,6 +1580,285 @@ class MemeApp {
                 slashEl.classList.add('flex');
             }
         }
+    }
+
+    /**
+     * 切换FAB悬浮按钮组的折叠/展开状态
+     */
+    toggleFabCollapsed() {
+        this.state.isFabCollapsed = !this.state.isFabCollapsed;
+        this.state.saveFabCollapsedState();
+        this.updateFabCollapsedVisuals();
+    }
+
+    /**
+     * 更新FAB悬浮按钮组的折叠/展开视觉状态
+     */
+    updateFabCollapsedVisuals() {
+        if (this.state.isFabCollapsed) {
+            // 折叠状态：隐藏主容器，显示迷你按钮条
+            this.dom.fabContainer.classList.add('hidden');
+            this.dom.fabMiniStrip.classList.remove('hidden');
+        } else {
+            // 展开状态：显示主容器，隐藏迷你按钮条
+            this.dom.fabContainer.classList.remove('hidden');
+            this.dom.fabMiniStrip.classList.add('hidden');
+        }
+    }
+
+    /**
+     * 初始化FAB迷你按钮组的位置
+     */
+    initFabMiniPosition() {
+        const savedPosition = this.state.fabMiniTopPosition;
+        if (savedPosition !== null) {
+            this.dom.fabMiniStrip.style.top = `${savedPosition}px`;
+        }
+    }
+
+    /**
+     * 初始化FAB迷你按钮组的拖拽功能（绑定到展开按钮，同时支持点击和拖拽）
+     */
+    initFabMiniDrag() {
+        const expandBtn = this.dom.fabExpandBtn;
+        const miniStrip = this.dom.fabMiniStrip;
+
+        if (!expandBtn || !miniStrip) return;
+
+        let isDragging = false;
+        let hasMoved = false; // 用于区分点击和拖拽
+        let startY = 0;
+        let startTop = 0;
+        let dragStartTime = 0;
+
+        const DRAG_THRESHOLD = 5; // 移动超过5px才算拖拽
+
+        const handlePointerDown = (e) => {
+            // 记录起始位置
+            isDragging = true;
+            hasMoved = false;
+            dragStartTime = Date.now();
+            startY = e.clientY || (e.touches && e.touches[0].clientY);
+
+            // 获取当前 top 值
+            const rect = miniStrip.getBoundingClientRect();
+            startTop = rect.top;
+
+            // 防止文本选择
+            e.preventDefault();
+        };
+
+        const handlePointerMove = (e) => {
+            if (!isDragging) return;
+
+            const clientY = e.clientY || (e.touches && e.touches[0].clientY);
+            const deltaY = clientY - startY;
+
+            // 判断是否超过拖拽阈值
+            if (Math.abs(deltaY) > DRAG_THRESHOLD) {
+                hasMoved = true;
+            }
+
+            if (!hasMoved) return;
+
+            let newTop = startTop + deltaY;
+
+            // 限制范围：最小 80px（顶部），最大为视窗高度减去按钮组高度
+            const minTop = 80;
+            const maxTop = window.innerHeight - miniStrip.offsetHeight - 16;
+            newTop = Math.max(minTop, Math.min(maxTop, newTop));
+
+            miniStrip.style.top = `${newTop}px`;
+        };
+
+        const handlePointerUp = (e) => {
+            if (!isDragging) return;
+
+            isDragging = false;
+
+            if (hasMoved) {
+                // 是拖拽操作，保存位置
+                const rect = miniStrip.getBoundingClientRect();
+                const topPosition = Math.round(rect.top);
+                this.state.fabMiniTopPosition = topPosition;
+                this.state.saveFabMiniPosition();
+            } else {
+                // 是点击操作，展开FAB
+                this.toggleFabCollapsed();
+            }
+        };
+
+        // 鼠标事件
+        expandBtn.addEventListener('mousedown', handlePointerDown);
+        document.addEventListener('mousemove', handlePointerMove);
+        document.addEventListener('mouseup', handlePointerUp);
+
+        // 触摸事件
+        expandBtn.addEventListener('touchstart', (e) => {
+            handlePointerDown(e);
+        }, { passive: false });
+
+        document.addEventListener('touchmove', (e) => {
+            if (!isDragging) return;
+            handlePointerMove(e);
+        }, { passive: true });
+
+        document.addEventListener('touchend', (e) => {
+            if (!isDragging) return;
+            handlePointerUp(e);
+        });
+    }
+
+    /**
+     * 初始化规则树自定义滚动条（支持 Pointer Capture，解决触屏拖拽丢失问题）
+     */
+    initRulesTreeHScrollSync() {
+        const wrapper = document.getElementById('rules-tree-scroll-wrapper');
+        const content = document.getElementById('rules-tree-content');
+        const container = document.getElementById('rules-tree-container');
+
+        if (!wrapper || !content || !container) return;
+
+        // 创建自定义滚动条元素
+        const vScrollbar = document.createElement('div');
+        vScrollbar.className = 'custom-scrollbar-v';
+        vScrollbar.innerHTML = '<div class="scrollbar-track"></div><div class="scrollbar-thumb"></div>';
+
+        const hScrollbar = document.createElement('div');
+        hScrollbar.className = 'custom-scrollbar-h';
+        hScrollbar.innerHTML = '<div class="scrollbar-track"></div><div class="scrollbar-thumb"></div>';
+
+        const corner = document.createElement('div');
+        corner.className = 'scrollbar-corner';
+
+        wrapper.appendChild(vScrollbar);
+        wrapper.appendChild(hScrollbar);
+        wrapper.appendChild(corner);
+
+        const vThumb = vScrollbar.querySelector('.scrollbar-thumb');
+        const hThumb = hScrollbar.querySelector('.scrollbar-thumb');
+
+        // 更新滑块位置和大小
+        const updateScrollbars = () => {
+            const contentWidth = container.scrollWidth;
+            const contentHeight = container.scrollHeight;
+            const viewportWidth = content.clientWidth;
+            const viewportHeight = content.clientHeight;
+
+            // 垂直滚动条
+            if (contentHeight > viewportHeight) {
+                vScrollbar.style.display = 'block';
+                const trackHeight = vScrollbar.clientHeight;
+                const thumbHeight = Math.max(30, (viewportHeight / contentHeight) * trackHeight);
+                const scrollRatio = content.scrollTop / (contentHeight - viewportHeight);
+                const thumbTop = scrollRatio * (trackHeight - thumbHeight);
+
+                vThumb.style.height = `${thumbHeight}px`;
+                vThumb.style.top = `${thumbTop}px`;
+            } else {
+                vScrollbar.style.display = 'none';
+            }
+
+            // 水平滚动条
+            if (contentWidth > viewportWidth) {
+                hScrollbar.style.display = 'block';
+                const trackWidth = hScrollbar.clientWidth;
+                const thumbWidth = Math.max(30, (viewportWidth / contentWidth) * trackWidth);
+                const scrollRatio = content.scrollLeft / (contentWidth - viewportWidth);
+                const thumbLeft = scrollRatio * (trackWidth - thumbWidth);
+
+                hThumb.style.width = `${thumbWidth}px`;
+                hThumb.style.left = `${thumbLeft}px`;
+            } else {
+                hScrollbar.style.display = 'none';
+            }
+
+            // 角落显示（两个滚动条都显示时才显示角落）
+            corner.style.display = (vScrollbar.style.display !== 'none' && hScrollbar.style.display !== 'none') ? 'block' : 'none';
+        };
+
+        // 监听内容滚动
+        content.addEventListener('scroll', updateScrollbars);
+
+        // 监听内容大小变化
+        const resizeObserver = new ResizeObserver(updateScrollbars);
+        resizeObserver.observe(container);
+        resizeObserver.observe(content);
+
+        // 初始更新
+        setTimeout(updateScrollbars, 100);
+
+        // ========== Pointer Capture 拖拽逻辑 ==========
+
+        const setupDrag = (thumb, scrollbar, isVertical) => {
+            let startPos = 0;
+            let startScroll = 0;
+
+            thumb.addEventListener('pointerdown', (e) => {
+                e.preventDefault();
+                thumb.setPointerCapture(e.pointerId);
+                thumb.classList.add('dragging');
+
+                startPos = isVertical ? e.clientY : e.clientX;
+                startScroll = isVertical ? content.scrollTop : content.scrollLeft;
+            });
+
+            thumb.addEventListener('pointermove', (e) => {
+                if (!thumb.hasPointerCapture(e.pointerId)) return;
+
+                const currentPos = isVertical ? e.clientY : e.clientX;
+                const delta = currentPos - startPos;
+
+                const trackSize = isVertical ? scrollbar.clientHeight : scrollbar.clientWidth;
+                const thumbSize = isVertical ? thumb.offsetHeight : thumb.offsetWidth;
+                const contentSize = isVertical ? container.scrollHeight : container.scrollWidth;
+                const viewportSize = isVertical ? content.clientHeight : content.clientWidth;
+
+                const scrollRange = contentSize - viewportSize;
+                const trackRange = trackSize - thumbSize;
+                const scrollDelta = (delta / trackRange) * scrollRange;
+
+                if (isVertical) {
+                    content.scrollTop = startScroll + scrollDelta;
+                } else {
+                    content.scrollLeft = startScroll + scrollDelta;
+                }
+            });
+
+            thumb.addEventListener('pointerup', (e) => {
+                thumb.releasePointerCapture(e.pointerId);
+                thumb.classList.remove('dragging');
+            });
+
+            thumb.addEventListener('pointercancel', (e) => {
+                thumb.releasePointerCapture(e.pointerId);
+                thumb.classList.remove('dragging');
+            });
+
+            // 点击轨道跳转
+            scrollbar.addEventListener('pointerdown', (e) => {
+                if (e.target === thumb) return;
+
+                const rect = scrollbar.getBoundingClientRect();
+                const clickPos = isVertical ? (e.clientY - rect.top) : (e.clientX - rect.left);
+                const trackSize = isVertical ? scrollbar.clientHeight : scrollbar.clientWidth;
+                const thumbSize = isVertical ? thumb.offsetHeight : thumb.offsetWidth;
+                const contentSize = isVertical ? container.scrollHeight : container.scrollWidth;
+                const viewportSize = isVertical ? content.clientHeight : content.clientWidth;
+
+                const scrollRange = contentSize - viewportSize;
+                const targetScroll = ((clickPos - thumbSize / 2) / (trackSize - thumbSize)) * scrollRange;
+
+                if (isVertical) {
+                    content.scrollTop = Math.max(0, Math.min(scrollRange, targetScroll));
+                } else {
+                    content.scrollLeft = Math.max(0, Math.min(scrollRange, targetScroll));
+                }
+            });
+        };
+
+        setupDrag(vThumb, vScrollbar, true);
+        setupDrag(hThumb, hScrollbar, false);
     }
 
     /**

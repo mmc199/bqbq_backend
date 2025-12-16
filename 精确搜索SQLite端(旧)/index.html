@@ -26,67 +26,74 @@
         </div>
     </header>
 
-    <aside id="rules-tree-panel" class="fixed top-16 left-0 h-full w-72 bg-white border-r border-slate-200 z-40 transform -translate-x-full transition-transform duration-300 flex flex-col p-4 shadow-xl">
-    <!-- Rules Tree Panel Header -->
-        <div id="rules-panel-header" class="flex items-center justify-between mb-3">
-            <h3 id="rules-panel-title" class="text-lg font-bold text-slate-700">🌳 同义词规则</h3>
-            <button id="refresh-rules-btn" class="p-1.5 text-slate-500 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition" title="刷新规则树">
-                <i data-lucide="refresh-cw" class="w-4 h-4"></i>
-            </button>
-        </div>
-
-        <!-- 规则树专用搜索栏 -->
-        <div id="rules-search-container" class="mb-3 relative">
-            <input
-                type="text"
-                id="rules-tree-search"
-                list="tree-suggestions"
-                placeholder="🔍 搜索组/关键词..."
-                class="w-full px-3 py-2 pr-8 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-200 focus:border-green-400"
-                title="在同义词规则树中搜索组名或关键词"
-            />
-            <button
-                id="rules-tree-search-clear"
-                class="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-600 transition hidden"
-                title="清空搜索"
-            >
-                <i data-lucide="x" class="w-4 h-4"></i>
-            </button>
-            <datalist id="tree-suggestions"></datalist>
-        </div>
-
-        <!-- 批量编辑工具栏（始终显示） -->
-        <div id="batch-edit-toolbar" class="mb-3 p-2 bg-blue-50 border border-blue-200 rounded-lg flex flex-col gap-1.5">
-            <!-- 第一行：批量 展开 折叠 +新组 -->
-            <div class="flex gap-1.5 items-center">
-                <button id="batch-mode-btn" class="px-2 py-1 text-xs bg-white text-blue-600 border border-blue-300 rounded hover:bg-blue-100 transition" title="进入/退出批量编辑模式">批量</button>
-                <button id="expand-all-btn" class="px-2 py-1 text-xs bg-white text-slate-600 border border-slate-300 rounded hover:bg-slate-100 transition" title="展开全部">展开</button>
-                <button id="collapse-all-btn" class="px-2 py-1 text-xs bg-white text-slate-600 border border-slate-300 rounded hover:bg-slate-100 transition" title="折叠全部">折叠</button>
-                <button id="add-root-group-btn" class="px-2 py-1 text-xs bg-blue-500 text-white rounded hover:bg-blue-600 transition" title="添加新组">新组</button>
+    <aside id="rules-tree-panel" class="fixed top-16 left-0 w-72 bg-white border-r border-slate-200/50 z-40 transform -translate-x-full transition-transform duration-300 shadow-xl overflow-hidden pl-5 pr-2 pt-2 pb-2" style="height: calc(100vh - 8rem);">
+        <!-- 内部容器：使用 flex 约束高度 -->
+        <div class="h-full flex flex-col">
+            <!-- Rules Tree Panel Header -->
+            <div id="rules-panel-header" class="flex items-center justify-between pt-2 pb-3 shrink-0">
+                <h3 id="rules-panel-title" class="text-lg font-bold text-slate-700">🌳 同义词规则</h3>
+                <div class="flex items-center gap-2">
+                    <span id="rules-version-info" class="text-xs text-slate-400" title="当前本地规则版本号">V0</span>
+                    <button id="refresh-rules-btn" class="p-1.5 text-slate-500 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition" title="刷新规则树（强制从服务器重新加载）">
+                        <i data-lucide="refresh-cw" class="w-4 h-4"></i>
+                    </button>
+                </div>
             </div>
-            <!-- 第二行：批量操作按钮（批量模式时显示） -->
-            <div id="batch-actions-row" class="hidden flex gap-1.5 items-center">
-                <button id="batch-select-all" class="px-2 py-1 text-xs bg-white text-blue-600 border border-blue-300 rounded hover:bg-blue-100 transition" title="全选/取消全选">全选</button>
-                <button id="batch-enable-btn" class="px-2 py-1 text-xs bg-emerald-500 text-white rounded hover:bg-emerald-600 transition" title="批量启用">启用</button>
-                <button id="batch-disable-btn" class="px-2 py-1 text-xs bg-yellow-500 text-white rounded hover:bg-yellow-600 transition" title="批量禁用">禁用</button>
-                <button id="batch-delete-btn" class="px-2 py-1 text-xs bg-red-500 text-white rounded hover:bg-red-600 transition" title="批量删除">删除</button>
-                <span id="batch-selected-info" class="text-xs text-blue-700 font-medium">已选(<span id="batch-selected-count" class="font-bold">0</span>)</span>
-            </div>
-        </div>
 
-        <div id="rules-tree-content" class="flex-1 overflow-y-auto custom-scrollbar">
-            <div id="rules-tree-container" class="space-y-2">
-                <p class="text-sm text-slate-400">加载中...</p>
+            <!-- 规则树专用搜索栏 -->
+            <div id="rules-search-container" class="pb-3 relative shrink-0">
+                <input
+                    type="text"
+                    id="rules-tree-search"
+                    list="tree-suggestions"
+                    placeholder="🔍 搜索组/关键词..."
+                    class="w-full px-3 py-2 pr-8 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-200 focus:border-green-400"
+                    title="在同义词规则树中搜索组名或关键词"
+                />
+                <button
+                    id="rules-tree-search-clear"
+                    class="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-600 transition hidden"
+                    title="清空搜索"
+                >
+                    <i data-lucide="x" class="w-4 h-4"></i>
+                </button>
+                <datalist id="tree-suggestions"></datalist>
             </div>
-        </div>
-        <div id="rules-panel-footer" class="mt-4 pt-3 border-t border-slate-100 text-xs text-slate-500 flex justify-between items-center">
-            <span id="rules-version-info" title="当前本地规则版本号">V0</span>
-            <button id="rules-force-sync" class="text-blue-500 hover:text-blue-700" title="忽略缓存，从服务器强制重新加载规则树">强制同步</button>
+
+            <!-- 批量编辑工具栏（始终显示） -->
+            <div id="batch-edit-toolbar" class="mb-3 p-2 bg-blue-50 border border-blue-200 rounded-lg flex flex-col gap-1.5 shrink-0">
+                <!-- 第一行：批量 展开 折叠 +新组 -->
+                <div class="flex gap-1.5 items-center">
+                    <button id="batch-mode-btn" class="px-2 py-1 text-xs bg-white text-blue-600 border border-blue-300 rounded hover:bg-blue-100 transition" title="进入/退出批量编辑模式">批量</button>
+                    <button id="expand-all-btn" class="px-2 py-1 text-xs bg-white text-slate-600 border border-slate-300 rounded hover:bg-slate-100 transition" title="展开全部">展开</button>
+                    <button id="collapse-all-btn" class="px-2 py-1 text-xs bg-white text-slate-600 border border-slate-300 rounded hover:bg-slate-100 transition" title="折叠全部">折叠</button>
+                    <button id="add-root-group-btn" class="px-2 py-1 text-xs bg-blue-500 text-white rounded hover:bg-blue-600 transition" title="添加新组">新组</button>
+                </div>
+                <!-- 第二行：批量操作按钮（批量模式时显示） -->
+                <div id="batch-actions-row" class="hidden flex gap-1.5 items-center">
+                    <button id="batch-select-all" class="px-2 py-1 text-xs bg-white text-blue-600 border border-blue-300 rounded hover:bg-blue-100 transition" title="全选/取消全选">全选</button>
+                    <button id="batch-enable-btn" class="px-2 py-1 text-xs bg-emerald-500 text-white rounded hover:bg-emerald-600 transition" title="批量启用">启用</button>
+                    <button id="batch-disable-btn" class="px-2 py-1 text-xs bg-yellow-500 text-white rounded hover:bg-yellow-600 transition" title="批量禁用">禁用</button>
+                    <button id="batch-delete-btn" class="px-2 py-1 text-xs bg-red-500 text-white rounded hover:bg-red-600 transition" title="批量删除">删除</button>
+                    <span id="batch-selected-info" class="text-xs text-blue-700 font-medium">已选(<span id="batch-selected-count" class="font-bold">0</span>)</span>
+                </div>
+            </div>
+
+            <!-- 滚动区域：滚动条贴边，水平在上垂直在左 -->
+            <div id="rules-tree-scroll-wrapper" class="flex-1 min-h-0 -ml-5 -mr-2 -mb-2 border-t border-slate-200 bg-slate-50/30">
+                <!-- 滚动容器：翻转使水平滚动条在上，rtl使垂直滚动条在左 -->
+                <div id="rules-tree-content" class="h-full overflow-auto">
+                    <!-- 内容容器 -->
+                    <div id="rules-tree-container" class="space-y-2 p-3">
+                        <p class="text-sm text-slate-400">加载中...</p>
+                    </div>
+                </div>
+            </div>
         </div>
     </aside>
 
-    <!-- 侧边栏展开/折叠按钮（统一按钮，全高贴边设计） -->
-    <button id="rules-panel-toggle-btn" class="fixed top-16 z-50 w-5 bg-gradient-to-r from-slate-50 to-white hover:from-slate-100 hover:to-slate-50 text-slate-400 hover:text-slate-600 border-r border-y border-slate-200 hover:border-slate-300 rounded-r-md shadow-md hover:shadow-lg hover:w-6 transition-all duration-300 flex items-center justify-center group" style="left: 0; height: calc(100vh - 4rem);" title="打开同义词规则侧边栏">
+    <!-- 侧边栏展开/折叠按钮（贴边设计） -->
+    <button id="rules-panel-toggle-btn" class="fixed top-16 z-50 w-5 hover:w-6 bg-gradient-to-r from-slate-50 to-white hover:from-slate-100 hover:to-slate-50 text-slate-400 hover:text-slate-600 border-r border-y border-slate-200 hover:border-slate-300 rounded-r-md shadow-md hover:shadow-lg transition-all duration-300 flex items-center justify-center group" style="left: 0; height: calc(100vh - 4rem - 4rem);" title="打开同义词规则侧边栏">
         <i data-lucide="chevron-right" class="w-3.5 h-3.5 group-hover:scale-110 transition-transform"></i>
     </button>
 
@@ -158,8 +165,9 @@
        UPDATED:
        - Changed `bottom-8` to `top-24` to stick to the top section.
        - Removed `lg:top-1/2` centering logic to keep it consistently at the top.
+       - Added collapse/expand functionality with mini buttons strip
     -->
-    <div id="fab-container" class="fixed right-8 grid grid-cols-2 gap-3 z-50 top-[8rem]">
+    <div id="fab-container" class="fixed right-4 grid grid-cols-2 gap-3 z-50 top-[7rem] transition-all duration-300">
 
         <!-- Export JSON -->
         <button id="fab-export" class="w-14 h-14 bg-white hover:bg-amber-50 text-amber-600 border border-amber-200 rounded-2xl shadow-lg hover:shadow-xl hover:scale-105 transition-all flex items-center justify-center relative group" title="导出数据">
@@ -227,7 +235,12 @@
                 <i data-lucide="search" class="w-7 h-7"></i>
             </button>
 
-            <!-- Clear Tags Button (Satellite Top) -->
+            <!-- FAB Toggle Button (Satellite Top-Left) - Collapse/Expand FAB Container -->
+            <button id="fab-toggle-btn" class="absolute -top-2 -left-2 w-8 h-8 bg-white text-slate-600 border border-slate-200 rounded-full shadow-md flex items-center justify-center hover:bg-slate-100 hover:text-blue-600 transition-all z-30" title="折叠悬浮按钮组">
+                <i data-lucide="chevrons-right" class="w-4 h-4"></i>
+            </button>
+
+            <!-- Clear Tags Button (Satellite Top-Right) -->
             <button id="clear-search-btn" class="absolute -top-2 -right-2 w-8 h-8 bg-white text-slate-600 border border-slate-200 rounded-full shadow-md flex items-center justify-center hover:bg-red-50 hover:text-red-500 transition-all z-30 group-hover:opacity-100" title="清空标签">
                 <i data-lucide="x" class="w-4 h-4"></i>
             </button>
@@ -248,6 +261,33 @@
             <span id="expansion-badge" class="absolute -top-1 -right-1 bg-purple-500 text-white text-[9px] font-bold px-1.5 py-0.5 rounded-full hidden whitespace-nowrap">0→0</span>
         </button>
 
+    </div>
+
+    <!-- Collapsed FAB Mini Strip (shown when FAB container is collapsed) -->
+    <!-- 半锚定式 FAB：容器贴边，按钮外侧50%悬挂在外 -->
+    <div id="fab-mini-strip" class="fixed z-50 hidden" style="top: 16rem; right: 0;">
+        <!-- 背景容器：仅包裹按钮内侧50%宽度（16px = 按钮32px的一半） -->
+        <div class="bg-white/80 backdrop-blur-sm border-l border-y border-slate-200 rounded-l-lg shadow-lg py-2 pl-1" style="width: 24px;">
+            <!-- 按钮容器：向左溢出，使按钮外侧悬挂 -->
+            <div class="flex flex-col gap-1.5" style="margin-left: -16px;">
+                <!-- Expand Button (同时支持拖拽和点击) -->
+                <button id="fab-expand-btn" class="w-8 h-8 bg-white hover:bg-blue-50 text-slate-500 hover:text-blue-600 border border-slate-200 rounded-full shadow-md flex items-center justify-center cursor-grab active:cursor-grabbing touch-none" title="拖拽调整位置 / 点击展开">
+                    <i data-lucide="chevrons-left" class="w-4 h-4"></i>
+                </button>
+                <!-- Clear Search Mini -->
+                <button id="fab-mini-clear" class="w-8 h-8 bg-white hover:bg-red-50 text-slate-500 hover:text-red-500 border border-slate-200 rounded-full shadow-md flex items-center justify-center" title="清空标签">
+                    <i data-lucide="x" class="w-4 h-4"></i>
+                </button>
+                <!-- Reload Mini -->
+                <button id="fab-mini-reload" class="w-8 h-8 bg-white hover:bg-slate-100 text-slate-500 hover:text-blue-600 border border-slate-200 rounded-full shadow-md flex items-center justify-center" title="刷新">
+                    <i data-lucide="refresh-cw" class="w-4 h-4"></i>
+                </button>
+                <!-- Search Mini -->
+                <button id="fab-mini-search" class="w-8 h-8 bg-blue-600 hover:bg-blue-700 text-white rounded-full shadow-md flex items-center justify-center" title="搜索">
+                    <i data-lucide="search" class="w-4 h-4"></i>
+                </button>
+            </div>
+        </div>
     </div>
 
     <!-- Datalist for Autocomplete -->
