@@ -218,13 +218,17 @@ class TagInput {
 
         // 2. Get the tag to edit
         const tag = this.tags[index];
-        const text = this.enableExcludes ? (tag.exclude ? '-' : '') + tag.text : tag;
+        let text = this.enableExcludes ? (tag.exclude ? '-' : '') + tag.text : tag;
 
-        // 3. Remove it from the list
+        // 3. 【修复】如果是同义词组，将文本转换为紧凑格式（移除逗号后的空格）
+        // 这样可以避免在编辑过程中触发空格分割，用户只有在末尾输入空格或按回车时才会形成新胶囊
+        text = text.replace(/, /g, ',');
+
+        // 4. Remove it from the list
         this.tags.splice(index, 1);
         this.onChange(this.tags); // Update state immediately (though visual update happens in render)
 
-        // 4. Put text into input and render
+        // 5. Put text into input and render
         this.input.value = text;
         this.render();
         this.input.focus();
