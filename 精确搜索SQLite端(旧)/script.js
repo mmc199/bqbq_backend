@@ -2379,7 +2379,7 @@ class MemeApp {
 
         if (!container) return;
 
-        versionInfo.textContent = `V${this.state.rulesBaseVersion}`;
+        versionInfo.textContent = `v${this.state.rulesBaseVersion}`;
 
         // 1. 获取规则树搜索框的内容进行过滤（与主搜索栏解耦）
         const treeSearchInput = document.getElementById('rules-tree-search');
