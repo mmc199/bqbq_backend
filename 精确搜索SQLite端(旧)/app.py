@@ -88,19 +88,50 @@ class MemeService:
             conn.commit()
 
     @staticmethod
+    def rebuild_tags_dict():
+        """
+        重建 tags_dict 表，统计所有图片中每个标签的实际使用次数。
+        在后端启动时调用一次，确保数据准确。
+        """
+        print("[Tags Dict] Rebuilding tags dictionary...")
+
+        with MemeService.get_conn() as conn:
+            # 1. 清空现有数据
+            conn.execute("DELETE FROM tags_dict")
+
+            # 2. 获取所有图片的标签
+            rows = conn.execute("SELECT tags_text FROM images_fts WHERE tags_text IS NOT NULL AND tags_text != ''").fetchall()
+
+            # 3. 统计每个标签的使用次数
+            tag_counts = {}
+            for row in rows:
+                tags = row['tags_text'].split(' ')
+                for tag in tags:
+                    tag = tag.strip()
+                    if tag:
+                        tag_counts[tag] = tag_counts.get(tag, 0) + 1
+
+            # 4. 批量插入
+            if tag_counts:
+                conn.executemany(
+                    "INSERT INTO tags_dict (name, use_count) VALUES (?, ?)",
+                    [(name, count) for name, count in tag_counts.items()]
+                )
+
+            conn.commit()
+
+        print(f"[Tags Dict] Rebuilt with {len(tag_counts)} unique tags.")
+
+    @staticmethod
     def update_index(md5, tags):
-        # ... (保持不变) ...
+        """更新图片的 FTS 索引（不再维护 tags_dict，由启动时重建）"""
         clean_tags = [t.strip() for t in tags if t.strip()]
         tags_str = " ".join(clean_tags)
-        
+
         with MemeService.get_conn() as conn:
             conn.execute("DELETE FROM images_fts WHERE md5=?", (md5,))
             if tags_str:
                 conn.execute("INSERT INTO images_fts (md5, tags_text) VALUES (?, ?)", (md5, tags_str))
-            
-            for t in clean_tags:
-                conn.execute("INSERT OR IGNORE INTO tags_dict (name, use_count) VALUES (?, 0)", (t,))
-                conn.execute("UPDATE tags_dict SET use_count = use_count + 1 WHERE name = ?", (t,))
             conn.commit()
 
     @staticmethod
@@ -1511,12 +1542,7 @@ def api_import_all():
             conn.execute("UPDATE system_meta SET version_id=?, last_updated_at=? WHERE key='rules_state'",
                         (rules.get('version_id', 0), time.time()))
 
-            # 4. 导入标签字典（如果提供）
-            if 'tags_dict' in data:
-                conn.execute("DELETE FROM tags_dict")
-                for tag_info in data['tags_dict']:
-                    conn.execute("INSERT INTO tags_dict (name, use_count) VALUES (?, ?)",
-                                (tag_info['name'], tag_info.get('use_count', 0)))
+            # tags_dict 不再通过导入恢复，由启动时自动重建
 
             conn.commit()
 
@@ -1539,9 +1565,9 @@ if __name__ == '__main__':
     is_reloader_process = os.environ.get('WERKZEUG_RUN_MAIN') == 'true'
     is_first_run = not is_reloader_process  # 如果不是 reloader 子进程，说明是首次启动
 
-    # 只在首次启动时扫描文件夹（避免 debug 模式下执行两次）
-    # 或者在非 debug 模式下正常执行
+    # 只在首次启动时执行初始化任务（避免 debug 模式下执行两次）
     if is_first_run:
         MemeService.scan_and_import_folder()
+        MemeService.rebuild_tags_dict()  # 重建标签字典
 
     app.run(host='0.0.0.0', port=5000, debug=True)
