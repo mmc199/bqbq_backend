@@ -16,7 +16,22 @@
       "Bash(dir:*)",
       "Bash(ls:*)",
       "Bash(head:*)",
-      "Bash(wc:*)"
+      "Bash(wc:*)",
+      "Bash(dir \"D:\\\\bqbq_bot_dev\\\\nonebot2-2.4.4\\\\nonebot\\\\plugins\\\\nonebot_plugin_memes\" /b)",
+      "Bash(dir \"D:\\\\bqbq_bot_dev\\\\nonebot2-2.4.4\\\\nonebot\\\\plugins\\\\nonebot_plugin_resolver2\" /b)",
+      "Bash(dir \"D:\\\\bqbq_bot_dev\\\\nonebot2-2.4.4\" /b)",
+      "Bash(dir \"D:\\\\bqbq_bot_dev\" /b)",
+      "Bash(dir \"D:\\\\bqbq_bot_dev\" /s /b)",
+      "Bash(findstr /i \"bot.py\")",
+      "Bash(findstr /i \"\\\\.env\")",
+      "Bash(cat \"D:\\\\bqbq_bot_dev\\\\nonebot2-2.4.4\\\\nonebot\\\\.env\")",
+      "Bash(del \"\\\\?\\\\%CD%\\\\nul\")",
+      "Bash(cmd /c \"del \\\\?\\\\c:\\\\000soft\\\\qqpy机器人-git\\\\bqbq_backend-1\\\\nul\")",
+      "Bash(powershell -Command \"Remove-Item -LiteralPath ''\\\\?\\\\c:\\\\000soft\\\\qqpy机器人-git\\\\bqbq_backend-1\\\\nul'' -Force\")",
+      "Bash(powershell -Command \"Remove-Item -LiteralPath ''\\\\?\\\\C:\\\\000soft\\\\qqpy机器人-git\\\\bqbq_backend-1\\\\nul'' -Force\")",
+      "Bash(cmd /c \"dir /x nul\")",
+      "Bash(python -c \"import os; os.remove\\(r''\\\\?\\\\C:\\\\000soft\\\\qqpy机器人-git\\\\bqbq_backend-1\\\\nul''\\)\")",
+      "Bash(python -c \"import os; print\\(os.path.exists\\(''nul''\\), os.path.isfile\\(''nul''\\)\\)\")"
     ],
     "deny": []
   }
