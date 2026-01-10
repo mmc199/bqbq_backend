@@ -24,7 +24,8 @@ if BQBQ_PLUGIN_DIR not in sys.path:
     sys.path.insert(0, BQBQ_PLUGIN_DIR)
 
 from rkey_manager import (
-    fetch_rkey, replace_rkey_in_url, increment_rkey_usage,
+    fetch_rkey, replace_rkey_in_url,
+    mark_rkey_download_success, mark_rkey_download_fail,
     load_rkey_usage, save_rkey_usage
 )
 
@@ -36,7 +37,7 @@ BACKEND_BASE_URL = "http://127.0.0.1:5001"
 UPLOAD_API = f"{BACKEND_BASE_URL}/api/check_upload"
 
 # 匹配失败记录的状态
-FAIL_PATTERNS = ["FALL_FAIL_HTTP", "RKEY_FAIL_HTTP", "RKEY_SKIPPED"]
+FAIL_PATTERNS = ["RKEY_FAIL_HTTP", "RKEY_FAIL_NET", "RKEY_API_FAIL"]
 
 
 def parse_log_file(file_path: str) -> list:
@@ -172,6 +173,7 @@ async def reprocess_failed_records(log_file: str = None):
                         resp = await client.get(new_url)
                         if resp.status_code != 200:
                             print(f"  重试后仍失败: HTTP {resp.status_code}")
+                            mark_rkey_download_fail()  # 标记 rkey 下载失败
                             stats["fail_download"] += 1
                             continue
                     else:
@@ -181,10 +183,11 @@ async def reprocess_failed_records(log_file: str = None):
 
                 content = resp.content
                 print(f"  下载成功: {len(content)} 字节")
-                increment_rkey_usage()  # 下载成功，增加使用计数
+                mark_rkey_download_success()  # 下载成功，标记有效并增加计数
 
             except Exception as e:
                 print(f"  下载异常: {e}")
+                mark_rkey_download_fail()  # 标记 rkey 下载失败
                 stats["fail_download"] += 1
                 continue
 
