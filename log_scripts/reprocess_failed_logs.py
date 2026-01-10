@@ -14,9 +14,11 @@
 import re
 import sys
 import time
+import json
 import httpx
 import asyncio
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+from pathlib import Path
 
 # ==========================
 #   配置
@@ -27,6 +29,7 @@ UPLOAD_API = f"{BACKEND_BASE_URL}/api/check_upload"
 
 # rkey 公共接口列表（按优先级排序）
 RKEY_APIS = [
+    "https://secret-service.bietiaop.com/rkeys",
     "http://napcat-sign.wumiao.wang:2082/rkey",
     "https://llob.linyuchen.net/rkey",
 ]
@@ -34,25 +37,101 @@ RKEY_APIS = [
 # 匹配失败记录的状态
 FAIL_PATTERNS = ["FALL_FAIL_HTTP", "RKEY_FAIL_HTTP", "RKEY_SKIPPED"]
 
+# rkey 有效性测试 URL（不含 rkey 参数，需要替换后测试）
+RKEY_TEST_URL = "https://gchat.qpic.cn/download?appid=1407&fileid=EhQ5BLRT4bxJ_-4xGJw0CPyUSdNP-hjxoQMg_woo97TXi4H5kQMyBHByb2RQgL2jAVoQkb0x_JXLKvxDpXsdrqdBoHoCz7SCAQJuag&rkey=PLACEHOLDER&spec=0"
+
 # ==========================
-#   rkey 获取（带缓存）
+#   rkey 获取（带缓存和计数）
 # ==========================
+RKEY_USE_LIMIT = 800  # 每个服务器的使用次数上限，防止风控
+RKEY_USAGE_FILE = Path(__file__).parent / "rkey_usage.json"  # 持久化文件路径
+
 _cached_rkey = {
     "group_rkey": None,
     "private_rkey": None,
     "expired_time": 0,
 }
 
-async def fetch_rkey(client: httpx.AsyncClient) -> dict:
-    """从公共接口获取 rkey，带缓存机制"""
-    global _cached_rkey
+_rkey_usage = {
+    "current_api_index": 0,  # 当前使用的 API 索引
+    "use_count": 0,          # 当前 API 的使用次数
+}
 
-    # 检查缓存是否有效
-    if _cached_rkey["expired_time"] > time.time() and _cached_rkey["group_rkey"]:
+
+def load_rkey_usage():
+    """从文件加载 rkey 使用计数和缓存的 rkey 信息"""
+    global _rkey_usage, _cached_rkey
+    if RKEY_USAGE_FILE.exists():
+        try:
+            with open(RKEY_USAGE_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                _rkey_usage["current_api_index"] = data.get("current_api_index", 0) % len(RKEY_APIS)
+                _rkey_usage["use_count"] = data.get("use_count", 0)
+
+                # 加载缓存的 rkey 信息
+                cached = data.get("cached_rkey", {})
+                _cached_rkey["group_rkey"] = cached.get("group_rkey")
+                _cached_rkey["private_rkey"] = cached.get("private_rkey")
+                _cached_rkey["expired_time"] = cached.get("expired_time", 0)
+
+                # 计算剩余有效时间
+                remaining = _cached_rkey["expired_time"] - time.time()
+                if remaining > 0:
+                    print(f"[rkey] 加载持久化: API索引={_rkey_usage['current_api_index']}, 使用次数={_rkey_usage['use_count']}, rkey剩余有效期={remaining:.0f}秒")
+                else:
+                    print(f"[rkey] 加载持久化: API索引={_rkey_usage['current_api_index']}, 使用次数={_rkey_usage['use_count']}, rkey已过期")
+                    # 清除过期的 rkey 缓存
+                    _cached_rkey["group_rkey"] = None
+                    _cached_rkey["private_rkey"] = None
+        except Exception as e:
+            print(f"[rkey] 加载持久化文件失败: {e}，使用默认值")
+
+
+def save_rkey_usage():
+    """保存 rkey 使用计数和缓存的 rkey 信息到文件"""
+    try:
+        data = {
+            "current_api_index": _rkey_usage["current_api_index"],
+            "use_count": _rkey_usage["use_count"],
+            "cached_rkey": {
+                "group_rkey": _cached_rkey["group_rkey"],
+                "private_rkey": _cached_rkey["private_rkey"],
+                "expired_time": _cached_rkey["expired_time"],
+            }
+        }
+        with open(RKEY_USAGE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"[rkey] 保存持久化文件失败: {e}")
+
+async def fetch_rkey(client: httpx.AsyncClient, force_refresh: bool = False) -> dict:
+    """从公共接口获取 rkey，带缓存机制
+
+    Args:
+        client: httpx 异步客户端
+        force_refresh: 是否强制刷新（忽略缓存）
+    """
+    global _cached_rkey, _rkey_usage
+
+    # 检查是否需要因为使用次数过多而切换 API
+    if _rkey_usage["use_count"] >= RKEY_USE_LIMIT:
+        print(f"[rkey] 当前 API 使用次数达到 {RKEY_USE_LIMIT}，切换到下一个服务器")
+        _rkey_usage["current_api_index"] = (_rkey_usage["current_api_index"] + 1) % len(RKEY_APIS)
+        _rkey_usage["use_count"] = 0
+        save_rkey_usage()  # 切换后保存
+        force_refresh = True  # 强制刷新以获取新服务器的 rkey
+
+    # 检查缓存是否有效（非强制刷新时）
+    if not force_refresh and _cached_rkey["expired_time"] > time.time() and _cached_rkey["group_rkey"]:
+        remaining = _cached_rkey["expired_time"] - time.time()
+        print(f"[rkey] 使用缓存，剩余有效期: {remaining:.0f}秒")
         return _cached_rkey
 
-    # 依次尝试各个接口
-    for api_url in RKEY_APIS:
+    # 从当前索引开始，依次尝试各个接口
+    start_index = _rkey_usage["current_api_index"]
+    for i in range(len(RKEY_APIS)):
+        api_index = (start_index + i) % len(RKEY_APIS)
+        api_url = RKEY_APIS[api_index]
         try:
             resp = await client.get(api_url, timeout=10.0)
             if resp.status_code == 200:
@@ -60,13 +139,30 @@ async def fetch_rkey(client: httpx.AsyncClient) -> dict:
                 _cached_rkey["group_rkey"] = data.get("group_rkey")
                 _cached_rkey["private_rkey"] = data.get("private_rkey")
                 _cached_rkey["expired_time"] = data.get("expired_time", 0)
-                print(f"[rkey] 从 {api_url} 获取成功，过期时间: {data.get('expired_time')}")
+                # 更新当前使用的 API 索引
+                if api_index != start_index:
+                    _rkey_usage["current_api_index"] = api_index
+                    _rkey_usage["use_count"] = 0
+                # 保存新获取的 rkey 到持久化文件
+                save_rkey_usage()
+                remaining = _cached_rkey["expired_time"] - time.time()
+                print(f"[rkey] 从 {api_url} 获取成功，剩余有效期: {remaining:.0f}秒，当前使用次数: {_rkey_usage['use_count']}")
                 return _cached_rkey
         except Exception as e:
             print(f"[rkey] 从 {api_url} 获取失败: {e}")
             continue
 
     return {"group_rkey": None, "private_rkey": None, "expired_time": 0}
+
+
+def increment_rkey_usage():
+    """下载成功后增加 rkey 使用计数"""
+    global _rkey_usage
+    _rkey_usage["use_count"] += 1
+    # 每 50 次保存一次，避免频繁写入磁盘
+    if _rkey_usage["use_count"] % 50 == 0:
+        save_rkey_usage()
+        print(f"[rkey] 当前使用次数: {_rkey_usage['use_count']}/{RKEY_USE_LIMIT}")
 
 
 def replace_rkey_in_url(url: str, new_rkey: str) -> str:
@@ -142,6 +238,9 @@ async def reprocess_failed_records(log_file: str = None):
     Returns:
         dict: 处理统计结果
     """
+    # 加载持久化的 rkey 使用计数
+    load_rkey_usage()
+
     if log_file is None:
         log_file = DEFAULT_LOG_FILE
 
@@ -204,12 +303,26 @@ async def reprocess_failed_records(log_file: str = None):
             try:
                 resp = await client.get(new_url)
                 if resp.status_code != 200:
-                    print(f"  下载失败: HTTP {resp.status_code}")
-                    stats["fail_download"] += 1
-                    continue
+                    # 下载失败，可能是 rkey 过期，尝试刷新后重试一次
+                    print(f"  下载失败: HTTP {resp.status_code}，尝试刷新 rkey...")
+                    rkey_data = await fetch_rkey(client, force_refresh=True)
+                    new_group_rkey = rkey_data.get("group_rkey")
+                    if new_group_rkey and new_group_rkey != group_rkey:
+                        group_rkey = new_group_rkey
+                        new_url = replace_rkey_in_url(url, group_rkey)
+                        resp = await client.get(new_url)
+                        if resp.status_code != 200:
+                            print(f"  重试后仍失败: HTTP {resp.status_code}")
+                            stats["fail_download"] += 1
+                            continue
+                    else:
+                        print(f"  无法获取新 rkey，跳过")
+                        stats["fail_download"] += 1
+                        continue
 
                 content = resp.content
                 print(f"  下载成功: {len(content)} 字节")
+                increment_rkey_usage()  # 下载成功，增加使用计数
 
             except Exception as e:
                 print(f"  下载异常: {e}")
@@ -262,15 +375,6 @@ async def reprocess_failed_records(log_file: str = None):
                 stats["fail_upload"] += 1
                 continue
 
-            # 检查 rkey 是否即将过期，提前刷新
-            if _cached_rkey["expired_time"] - time.time() < 300:
-                print("  [rkey] 即将过期，刷新...")
-                rkey_data = await fetch_rkey(client)
-                group_rkey = rkey_data.get("group_rkey")
-                if not group_rkey:
-                    print("  [错误] 刷新 rkey 失败")
-                    break
-
     # 统一更新日志文件
     if line_updates:
         print(f"\n[写入] 更新 {len(line_updates)} 行...")
@@ -291,6 +395,9 @@ async def reprocess_failed_records(log_file: str = None):
     print(f"  失败-上传: {stats['fail_upload']}")
     print(f"  失败-rkey: {stats['fail_rkey']}")
     print("=" * 50)
+
+    # 保存 rkey 使用计数
+    save_rkey_usage()
 
     return stats
 
