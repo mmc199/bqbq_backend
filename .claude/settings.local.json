@@ -55,7 +55,11 @@
       "Bash(dir /b \"D:\\\\bqbq_bot_dev\\\\nonebot2-2.4.4\\\\nonebot\\\\plugins\\\\bqbq\")",
       "Bash(python -m py_compile:*)",
       "Bash(dir \"D:\\\\bqbq_bot_dev\\\\nonebot2-2.4.4\\\\nonebot\\\\plugins\\\\bqbq\" /b)",
-      "Read(//d/bqbq_bot_dev/nonebot2-2.4.4/nonebot/plugins/bqbq/**)"
+      "Read(//d/bqbq_bot_dev/nonebot2-2.4.4/nonebot/plugins/bqbq/**)",
+      "Bash(py -c \"from log_utils import *; print\\(''log_utils OK''\\)\")",
+      "Bash(py -c \"from analyze_log import parse_log; print\\(''analyze_log OK''\\)\")",
+      "Bash(py -c \"from reprocess_failed_logs import reprocess_failed_records; print\\(''reprocess_failed_logs OK''\\)\")",
+      "Bash(py -c \"from batch_reprocess_logs import find_log_files; print\\(''batch_reprocess_logs OK''\\)\")"
     ],
     "deny": []
   }
