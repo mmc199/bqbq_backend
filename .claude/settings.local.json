@@ -31,7 +31,24 @@
       "Bash(powershell -Command \"Remove-Item -LiteralPath ''\\\\?\\\\C:\\\\000soft\\\\qqpy机器人-git\\\\bqbq_backend-1\\\\nul'' -Force\")",
       "Bash(cmd /c \"dir /x nul\")",
       "Bash(python -c \"import os; os.remove\\(r''\\\\?\\\\C:\\\\000soft\\\\qqpy机器人-git\\\\bqbq_backend-1\\\\nul''\\)\")",
-      "Bash(python -c \"import os; print\\(os.path.exists\\(''nul''\\), os.path.isfile\\(''nul''\\)\\)\")"
+      "Bash(python -c \"import os; print\\(os.path.exists\\(''nul''\\), os.path.isfile\\(''nul''\\)\\)\")",
+      "Bash(python \"c:\\\\000soft\\\\qqpy机器人-git\\\\bqbq_backend-1\\\\analyze_log.py\")",
+      "Bash(findstr /R \"gchatpic_new/[0-9][0-9][0-9]\" \"D:\\\\bqbq_bot_dev\\\\nonebot2-2.4.4\\\\nonebot\\\\plugins\\\\bqbq\\\\bqbq_download_full.log\")",
+      "Bash(findstr /V \"gchatpic_new/0/0-0\")",
+      "Bash(python -c \"\nimport re\n\nlog_path = r''D:\\\\bqbq_bot_dev\\\\nonebot2-2.4.4\\\\nonebot\\\\plugins\\\\bqbq\\\\bqbq_download_full.log''\n\n# 统计两种构造方式\nurl1_count = 0  # gchatpic_new/0/0-0-\nurl2_count = 0  # gchatpic_new/{sender_qq}/\n\nwith open\\(log_path, ''r'', encoding=''utf-8''\\) as f:\n    for line in f:\n        if ''CONSTRUCT'' in line:\n            # 下一行是URL\n            continue\n        if ''gchat.qpic.cn/gchatpic_new/'' in line:\n            if ''/0/0-0-'' in line:\n                url1_count += 1\n            elif re.search\\(r''/gchatpic_new/[1-9]\\\\d+/'', line\\):\n                url2_count += 1\n\nprint\\(f''构造方式1 \\(0/0-0-MD5\\): {url1_count} 条''\\)\nprint\\(f''构造方式2 \\(sender_qq/group-random-MD5\\): {url2_count} 条''\\)\n\")",
+      "Bash(dir /b \"D:\\\\bqbq_bot_dev\\\\nonebot2-2.4.4\")",
+      "Bash(pip show nonebot-plugin-access-control nonebot-plugin-memes)",
+      "Bash(pip show nonebot-plugin-access-control)",
+      "Bash(pip show nonebot-plugin-access-control -f)",
+      "Bash(python -c \"from nonebot_plugin_memes.config import memes_config; print\\(dir\\(memes_config\\)\\)\")",
+      "Bash(pip show nonebot-plugin-memes)",
+      "Bash(pip show nonebot-plugin-manager)",
+      "Bash(pip install nonebot-plugin-manager)",
+      "Bash(pip show nonebot-plugin-orm)",
+      "Bash(python:*)",
+      "Bash(python download_images.py:*)",
+      "Bash(dir \"C:\\\\000soft\\\\qqpy机器人-git\\\\bqbq_backend-1\\\\pighub.top\")",
+      "Bash(findstr:*)"
     ],
     "deny": []
   }
