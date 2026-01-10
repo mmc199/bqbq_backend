@@ -37,7 +37,7 @@ BACKEND_BASE_URL = "http://127.0.0.1:5001"
 UPLOAD_API = f"{BACKEND_BASE_URL}/api/check_upload"
 
 # 匹配失败记录的状态
-FAIL_PATTERNS = ["RKEY_FAIL_HTTP", "RKEY_FAIL_NET", "RKEY_API_FAIL"]
+FAIL_PATTERNS = ["RKEY_FAIL_HTTP", "RKEY_FAIL_NET", "RKEY_API_FAIL", "RKEY_EXPIRED"]
 
 
 def parse_log_file(file_path: str) -> list:
