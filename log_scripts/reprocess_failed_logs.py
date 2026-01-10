@@ -2,11 +2,10 @@
 重处理失败日志脚本
 
 功能：
-1. 读取 bqbq_download_full-*.log 中的 FALL_FAIL_HTTP 记录
-2. 用公共 rkey 接口获取 group_rkey 替换原 URL 中的 rkey
-3. 重新下载并上传到后端
-4. 成功后更新日志状态为 FALLBACK_NEW 或 FALLBACK_DUP
-5. 在内存中统一修改后写入，减少磁盘 IO
+1. 读取 bqbq_download_full-*.log 中的失败记录
+2. 使用公共 image_downloader 模块重新下载并上传
+3. 成功后更新日志状态为 FALLBACK_NEW 或 FALLBACK_DUP
+4. 在内存中统一修改后写入，减少磁盘 IO
 
 支持命令行参数指定日志文件路径
 """
@@ -17,27 +16,26 @@ import httpx
 import asyncio
 
 # ==========================
-#   导入 rkey 管理模块
+#   导入公共模块
 # ==========================
 BQBQ_PLUGIN_DIR = r"D:\bqbq_bot_dev\nonebot2-2.4.4\nonebot\plugins\bqbq"
 if BQBQ_PLUGIN_DIR not in sys.path:
     sys.path.insert(0, BQBQ_PLUGIN_DIR)
 
-from rkey_manager import (
-    fetch_rkey, replace_rkey_in_url,
-    mark_rkey_download_success, mark_rkey_download_fail,
-    load_rkey_usage, save_rkey_usage
-)
+from image_downloader import ImageDownloader, DownloadContext
+from rkey_manager import load_rkey_usage, save_rkey_usage
 
 # ==========================
 #   配置
 # ==========================
 DEFAULT_LOG_FILE = r"D:\bqbq_bot_dev\nonebot2-2.4.4\nonebot\plugins\bqbq\bqbq_download_full-日志1.log"
 BACKEND_BASE_URL = "http://127.0.0.1:5001"
-UPLOAD_API = f"{BACKEND_BASE_URL}/api/check_upload"
 
 # 匹配失败记录的状态
 FAIL_PATTERNS = ["RKEY_FAIL_HTTP", "RKEY_FAIL_NET", "RKEY_API_FAIL", "RKEY_EXPIRED"]
+
+# 创建下载器实例
+_downloader = ImageDownloader(backend_url=BACKEND_BASE_URL)
 
 
 def parse_log_file(file_path: str) -> list:
@@ -119,30 +117,20 @@ async def reprocess_failed_records(log_file: str = None):
 
     if not failed_records:
         print("[完成] 没有需要重处理的记录")
-        return {"total": 0, "success_new": 0, "success_dup": 0, "fail_download": 0, "fail_upload": 0, "fail_rkey": 0}
+        return {"total": 0, "success_new": 0, "success_dup": 0, "fail": 0}
 
     # 统计
     stats = {
         "total": len(failed_records),
         "success_new": 0,
         "success_dup": 0,
-        "fail_rkey": 0,
-        "fail_download": 0,
-        "fail_upload": 0,
+        "fail": 0,
     }
 
     # 创建行号到记录的映射，用于更新
     line_updates = {}
 
     async with httpx.AsyncClient(timeout=30.0) as client:
-        # 先获取 rkey
-        rkey_data = await fetch_rkey(client)
-        group_rkey = rkey_data.get("group_rkey")
-
-        if not group_rkey:
-            print("[错误] 无法获取公共 rkey，退出")
-            return
-
         for idx, record in enumerate(failed_records):
             url = record["url"]
             file_name = record["file_name"]
@@ -155,65 +143,29 @@ async def reprocess_failed_records(log_file: str = None):
                 print(f"  跳过: URL 不包含 rkey")
                 continue
 
-            # 替换 rkey
-            new_url = replace_rkey_in_url(url, group_rkey)
-            print(f"  替换 rkey 后尝试下载...")
+            # 提取 MD5（从文件名）
+            md5_val = file_name.split(".")[0] if file_name else ""
 
-            # 尝试下载
-            try:
-                resp = await client.get(new_url)
-                if resp.status_code != 200:
-                    # 下载失败，可能是 rkey 过期，尝试刷新后重试一次
-                    print(f"  下载失败: HTTP {resp.status_code}，尝试刷新 rkey...")
-                    rkey_data = await fetch_rkey(client, force_refresh=True)
-                    new_group_rkey = rkey_data.get("group_rkey")
-                    if new_group_rkey and new_group_rkey != group_rkey:
-                        group_rkey = new_group_rkey
-                        new_url = replace_rkey_in_url(url, group_rkey)
-                        resp = await client.get(new_url)
-                        if resp.status_code != 200:
-                            print(f"  重试后仍失败: HTTP {resp.status_code}")
-                            mark_rkey_download_fail()  # 标记 rkey 下载失败
-                            stats["fail_download"] += 1
-                            continue
-                    else:
-                        print(f"  无法获取新 rkey，跳过")
-                        stats["fail_download"] += 1
-                        continue
+            # 构造下载上下文
+            ctx = DownloadContext(
+                md5=md5_val,
+                original_url=url,
+                file_name=file_name,
+            )
 
-                content = resp.content
-                print(f"  下载成功: {len(content)} 字节")
-                mark_rkey_download_success()  # 下载成功，标记有效并增加计数
+            # 调用下载器处理
+            result = await _downloader.process(client, ctx)
 
-            except Exception as e:
-                print(f"  下载异常: {e}")
-                mark_rkey_download_fail()  # 标记 rkey 下载失败
-                stats["fail_download"] += 1
-                continue
-
-            # 上传到后端
-            try:
-                upload_resp = await client.post(
-                    UPLOAD_API,
-                    files={"file": ("auto.gif", content, "image/gif")},
-                )
-
-                if upload_resp.status_code != 200:
-                    print(f"  上传失败: HTTP {upload_resp.status_code}")
-                    stats["fail_upload"] += 1
-                    continue
-
-                result = upload_resp.json()
-                is_new = not result.get("exists", False)
-
-                if is_new:
+            if result.success and result.download_method != "PRE_DUP":
+                # 成功
+                if result.is_new:
                     new_status = "FALLBACK_NEW"
                     stats["success_new"] += 1
                 else:
                     new_status = "FALLBACK_DUP"
                     stats["success_dup"] += 1
 
-                print(f"  上传成功: {new_status}")
+                print(f"  成功: {new_status}")
 
                 # 记录需要更新的行
                 old_header = record["header_line"]
@@ -230,12 +182,26 @@ async def reprocess_failed_records(log_file: str = None):
                 )
 
                 line_updates[line_index] = new_header
-                line_updates[line_index + 1] = f"[{new_url}]"
+                line_updates[line_index + 1] = f"[{result.final_url}]"
 
-            except Exception as e:
-                print(f"  上传异常: {e}")
-                stats["fail_upload"] += 1
-                continue
+            elif result.download_method == "PRE_DUP":
+                # 预查重发现已存在
+                print(f"  跳过: 图片已存在（预查重）")
+                stats["success_dup"] += 1
+
+                # 更新状态为 PRE_DUP
+                old_header = record["header_line"]
+                new_header = re.sub(
+                    r'\[Res:\s*\S+\]',
+                    '[Res: PRE_DUP]',
+                    old_header
+                )
+                line_updates[line_index] = new_header
+
+            else:
+                # 失败
+                print(f"  失败: {result.error_info or 'UNKNOWN'}")
+                stats["fail"] += 1
 
     # 统一更新日志文件
     if line_updates:
@@ -253,10 +219,12 @@ async def reprocess_failed_records(log_file: str = None):
     print(f"  总数: {stats['total']}")
     print(f"  成功-新增: {stats['success_new']}")
     print(f"  成功-重复: {stats['success_dup']}")
-    print(f"  失败-下载: {stats['fail_download']}")
-    print(f"  失败-上传: {stats['fail_upload']}")
-    print(f"  失败-rkey: {stats['fail_rkey']}")
+    print(f"  失败: {stats['fail']}")
     print("=" * 50)
+
+    # 输出下载器统计
+    print("\n下载器统计:")
+    print(_downloader.get_stats_string())
 
     # 保存 rkey 使用计数
     save_rkey_usage()
