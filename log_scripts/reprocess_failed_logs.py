@@ -69,8 +69,8 @@ async def reprocess_failed_records(log_file: str = None) -> dict:
             print(f"\n[{idx + 1}/{len(failed)}] 处理: {rec.file_name}")
 
             if "rkey=" not in rec.url:
-                print(f"  跳过: URL 不包含 rkey")
-                continue
+                print(f"continue  跳过: URL 不包含 rkey")
+                
 
             md5_val = rec.file_name.split(".")[0] if rec.file_name else ""
             ctx = DownloadContext(md5=md5_val, original_url=rec.url, file_name=rec.file_name)

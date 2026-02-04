@@ -23,7 +23,7 @@ LOG_PATTERN = "bqbq_download_full-*.log"
 # 失败状态类型（用于筛选需要重处理的记录）
 FAIL_STATUSES = frozenset([
     "RKEY_FAIL_HTTP", "RKEY_FAIL_NET", "RKEY_API_FAIL", "RKEY_EXPIRED",
-    "FALL_FAIL_HTTP", "RKEY_SKIPPED"
+    "FALL_FAIL_HTTP", "RKEY_SKIPPED" , "UPLOAD_FAIL"
 ])
 
 
